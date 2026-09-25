@@ -1,3 +1,5 @@
+from django.http import FileResponse
+from core.pdf_utils import generate_invoice_pdf
 from core.permissions import IsFinance, IsAccountant, IsAccounts
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -16,7 +18,6 @@ from .serializers import (
     PVFilingSerializer, PVAuthorizationSerializer, GeneralLedgerSerializer,
     StatementOfAccountSerializer, SOASubmissionSerializer, DispatchLogSerializer,
 )
-from core.permissions import IsFinance
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
@@ -29,11 +30,22 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        invoice = self.get_object()
+        buffer = generate_invoice_pdf(invoice)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{invoice.invoice_no}.pdf",
+            content_type='application/pdf',
+        )
+
 
 class PaymentViewSet(viewsets.ModelViewSet):
     queryset = Payment.objects.all().select_related('invoice')
     serializer_class = PaymentSerializer
-    permission_classes = [IsAuthenticated, IsAccounts]
+    permission_classes = [IsAuthenticated, IsAccountant]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['invoice']
 
@@ -51,7 +63,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
 class PaymentVoucherViewSet(viewsets.ModelViewSet):
     queryset = PaymentVoucher.objects.all()
     serializer_class = PaymentVoucherSerializer
-    permission_classes = [IsAuthenticated, IsAccounts]
+    permission_classes = [IsAuthenticated, IsAccountant]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status']
 
@@ -72,13 +84,13 @@ class PaymentVoucherViewSet(viewsets.ModelViewSet):
 class PVFilingViewSet(viewsets.ModelViewSet):
     queryset = PVFiling.objects.all()
     serializer_class = PVFilingSerializer
-    permission_classes = [IsAuthenticated, IsAccounts]
+    permission_classes = [IsAuthenticated, IsAccountant]
 
 
 class GeneralLedgerViewSet(viewsets.ModelViewSet):
     queryset = GeneralLedger.objects.all()
     serializer_class = GeneralLedgerSerializer
-    permission_classes = [IsAuthenticated, IsAccounts]
+    permission_classes = [IsAuthenticated, IsAccountant]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['account_code', 'entry_date']
 
@@ -99,6 +111,7 @@ class SOASubmissionViewSet(viewsets.ModelViewSet):
     queryset = SOASubmission.objects.all()
     serializer_class = SOASubmissionSerializer
     permission_classes = [IsAuthenticated, IsAccounts]
+
     def perform_create(self, serializer):
         serializer.save(submitted_by=self.request.user)
 

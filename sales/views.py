@@ -1,3 +1,5 @@
+from django.http import FileResponse
+from core.pdf_utils import generate_quotation_pdf
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -85,6 +87,17 @@ class QuotationViewSet(viewsets.ModelViewSet):
         AuditLog.objects.create(
             user=self.request.user, action='CREATE', module='SALES_QUOTATION',
             reference_id=str(quotation.id),
+        )
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        quotation = self.get_object()
+        buffer = generate_quotation_pdf(quotation)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{quotation.quote_no}.pdf",
+            content_type='application/pdf',
         )
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsFinance])
