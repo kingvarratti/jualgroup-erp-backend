@@ -20,7 +20,7 @@ from .models import (
 from .serializers import (
     InventoryItemSerializer, StockRequisitionSerializer, StockRequisitionItemSerializer,
     SupplierSerializer, SupplierRFQSerializer, SupplierQuoteSerializer,
-    PurchaseOrderSerializer, PurchaseOrderItemSerializer,
+    PurchaseOrderSerializer, PurchaseOrderCreateSerializer, PurchaseOrderItemSerializer,
     GoodsReceivedNoteSerializer, SupplierPaymentSerializer, WarehouseMovementSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
@@ -263,16 +263,20 @@ class SupplierQuoteViewSet(viewsets.ModelViewSet):
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all().select_related('supplier', 'client_po').prefetch_related('items')
-    serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, IsSupplyChain]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status', 'client_po', 'supplier']
 
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PurchaseOrderCreateSerializer
+        return PurchaseOrderSerializer
+
     def perform_create(self, serializer):
-        serializer.save(issued_by=self.request.user)
+        po = serializer.save()
         ApprovalRequest.objects.create(
             module='PURCHASE_ORDER',
-            reference_id=str(serializer.instance.id),
+            reference_id=str(po.id),
             requester=self.request.user,
             required_role=Role.FINANCE,
             rank=1,

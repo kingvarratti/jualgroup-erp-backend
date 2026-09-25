@@ -80,7 +80,7 @@ class Quotation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    FINANCE_THRESHOLD = 100000  # GHS
+    FINANCE_THRESHOLD = 100000
 
     class Meta:
         ordering = ['-created_at']
@@ -88,7 +88,6 @@ class Quotation(models.Model):
     def save(self, *args, **kwargs):
         if not self.quote_no:
             self.quote_no = f"QT-{uuid.uuid4().hex[:8].upper()}"
-        # Financial Validation Gate: > GHS 100,000 requires Finance approval
         if self.total_amount > self.FINANCE_THRESHOLD and self.status == 'DRAFT':
             self.status = 'PENDING_FINANCE'
         super().save(*args, **kwargs)
@@ -164,6 +163,32 @@ class ClientPO(models.Model):
 
     def __str__(self):
         return f"{self.internal_order_no} ({self.client_po_number})"
+
+
+class ClientPOItem(models.Model):
+    """Line items for a Client Purchase Order."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client_po = models.ForeignKey(
+        ClientPO, on_delete=models.CASCADE, related_name='items'
+    )
+    item = models.ForeignKey(
+        'procurement.InventoryItem',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        help_text='Optional link to inventory item',
+    )
+    description = models.CharField(max_length=300)
+    quantity = models.DecimalField(max_digits=14, decimal_places=2, default=1)
+    unit_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=0, editable=False)
+
+    def save(self, *args, **kwargs):
+        self.total = self.quantity * self.unit_price
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.description} x {self.quantity}"
 
 
 class ProjectReview(models.Model):

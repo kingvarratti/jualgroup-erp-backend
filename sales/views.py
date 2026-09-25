@@ -13,9 +13,10 @@ from .models import (
 )
 from .serializers import (
     EnquirySerializer, PreliminaryGASerializer, QuotationSerializer,
-    QuotationCreateSerializer, ClientPOSerializer, OfferSubmissionSerializer,
-    FollowUpDiscussionSerializer, ProjectReviewSerializer,
+    QuotationCreateSerializer, ClientPOSerializer, ClientPOCreateSerializer,
+    OfferSubmissionSerializer, FollowUpDiscussionSerializer, ProjectReviewSerializer,
 )
+
 from core.models import ApprovalRequest, AuditLog, Role
 from core.permissions import IsSales, IsFinance
 
@@ -158,11 +159,35 @@ class FollowUpDiscussionViewSet(viewsets.ModelViewSet):
 
 
 class ClientPOViewSet(viewsets.ModelViewSet):
-    queryset = ClientPO.objects.all().select_related('quotation', 'acknowledged_by').prefetch_related('project_reviews')
-    serializer_class = ClientPOSerializer
+    queryset = ClientPO.objects.all().select_related('quotation', 'acknowledged_by').prefetch_related('project_reviews', 'items')
     permission_classes = [IsAuthenticated, IsSales]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status']
+
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return ClientPOCreateSerializer
+        return ClientPOSerializer
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='CLIENT_PO',
+            reference_id=instance.internal_order_no,
+        )
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_client_po_pdf
+        po = self.get_object()
+        buffer = generate_client_po_pdf(po)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{po.internal_order_no}.pdf",
+            content_type='application/pdf',
+        )
 
     def perform_create(self, serializer):
         instance = serializer.save(acknowledged_by=self.request.user)

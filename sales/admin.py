@@ -1,12 +1,17 @@
 from django.contrib import admin
 from .models import (
     Enquiry, PreliminaryGA, Quotation, QuotationLineItem,
-    OfferSubmission, FollowUpDiscussion, ClientPO, ProjectReview,
+    OfferSubmission, FollowUpDiscussion, ClientPO, ClientPOItem, ProjectReview,
 )
 
 
 class QuotationLineItemInline(admin.TabularInline):
     model = QuotationLineItem
+    extra = 1
+
+
+class ClientPOItemInline(admin.TabularInline):
+    model = ClientPOItem
     extra = 1
 
 
@@ -38,6 +43,7 @@ class ClientPOAdmin(admin.ModelAdmin):
     list_display = ('internal_order_no', 'client_po_number', 'total_value', 'status', 'po_date')
     list_filter = ('status',)
     search_fields = ('internal_order_no', 'client_po_number')
+    inlines = [ClientPOItemInline]
     readonly_fields = ('internal_order_no', 'created_at')
 
 

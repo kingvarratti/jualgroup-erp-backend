@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     Enquiry, PreliminaryGA, Quotation, QuotationLineItem,
-    OfferSubmission, FollowUpDiscussion, ClientPO, ProjectReview,
+    OfferSubmission, FollowUpDiscussion, ClientPO, ClientPOItem, ProjectReview,
 )
 
 
@@ -81,11 +81,61 @@ class ProjectReviewSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_by', 'created_at']
 
 
+# ---------- CLIENT PO + ITEMS ----------
+
+class ClientPOItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClientPOItem
+        fields = '__all__'
+        read_only_fields = ['id', 'total']
+        extra_kwargs = {
+            'client_po': {'required': False, 'allow_null': True},
+        }
+
+
 class ClientPOSerializer(serializers.ModelSerializer):
     acknowledged_by_name = serializers.CharField(source='acknowledged_by.get_full_name', read_only=True)
     project_reviews = ProjectReviewSerializer(many=True, read_only=True)
+    items = ClientPOItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = ClientPO
         fields = '__all__'
         read_only_fields = ['id', 'internal_order_no', 'acknowledged_by', 'created_at']
+
+
+class ClientPOCreateSerializer(serializers.ModelSerializer):
+    items = ClientPOItemSerializer(many=True, write_only=True, required=False)
+
+    class Meta:
+        model = ClientPO
+        fields = [
+            'id', 'quotation', 'client_po_number', 'client_po_file',
+            'po_date', 'total_value', 'urs_document', 'internal_files',
+            'user_requirements', 'items',
+        ]
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        user = self.context['request'].user
+        po = ClientPO.objects.create(acknowledged_by=user, **validated_data)
+        for item in items_data:
+            item.pop('id', None)
+            item.pop('total', None)
+            item.pop('client_po', None)
+            ClientPOItem.objects.create(client_po=po, **item)
+        return po
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        for k, v in validated_data.items():
+            setattr(instance, k, v)
+        instance.save()
+        if items_data is not None:
+            instance.items.all().delete()
+            for item in items_data:
+                item.pop('id', None)
+                item.pop('total', None)
+                item.pop('client_po', None)
+                ClientPOItem.objects.create(client_po=instance, **item)
+        return instance

@@ -12,12 +12,8 @@ class InventoryItemSerializer(serializers.ModelSerializer):
     needs_reorder = serializers.BooleanField(read_only=True)
     is_out_of_stock = serializers.BooleanField(read_only=True)
     stock_status = serializers.CharField(read_only=True)
-    stock_value = serializers.DecimalField(
-        max_digits=14, decimal_places=2, read_only=True
-    )
-    category_display = serializers.CharField(
-        source='get_category_display', read_only=True
-    )
+    stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
 
     class Meta:
         model = InventoryItem
@@ -68,20 +64,51 @@ class SupplierQuoteSerializer(serializers.ModelSerializer):
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
+    item_detail = InventoryItemSerializer(source='item', read_only=True)
+
     class Meta:
         model = PurchaseOrderItem
         fields = '__all__'
         read_only_fields = ['id', 'total']
+        extra_kwargs = {
+            'po': {'required': False, 'allow_null': True},
+        }
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     items = PurchaseOrderItemSerializer(many=True, read_only=True)
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    client_po_no = serializers.CharField(source='client_po.internal_order_no', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta:
         model = PurchaseOrder
         fields = '__all__'
         read_only_fields = ['id', 'po_no', 'status', 'issued_by', 'approved_by', 'created_at']
+
+
+class PurchaseOrderCreateSerializer(serializers.ModelSerializer):
+    """Accepts nested line items on create."""
+    items = PurchaseOrderItemSerializer(many=True, write_only=True, required=False)
+
+    class Meta:
+        model = PurchaseOrder
+        fields = [
+            'id', 'supplier', 'client_po', 'rfq', 'total_cost', 'currency',
+            'expected_delivery', 'notes', 'items',
+        ]
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        user = self.context['request'].user
+        po = PurchaseOrder.objects.create(issued_by=user, **validated_data)
+        for item in items_data:
+            # Remove nested id/total if present
+            item.pop('id', None)
+            item.pop('total', None)
+            item.pop('item_detail', None)
+            PurchaseOrderItem.objects.create(po=po, **item)
+        return po
 
 
 class GRNItemSerializer(serializers.ModelSerializer):

@@ -329,3 +329,94 @@ def generate_quotation_pdf(quotation):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
+
+def generate_client_po_pdf(client_po):
+    buffer = io.BytesIO()
+    doc = _build_doc(buffer, f"Client PO {client_po.internal_order_no}")
+    story = []
+
+    _company_header(story)
+    _doc_title(
+        story,
+        f"CLIENT PURCHASE ORDER",
+        f"Order No: {client_po.internal_order_no}  |  Client PO: {client_po.client_po_number}  |  Date: {client_po.po_date}",
+    )
+
+    info_rows = [
+        ("Internal Order No.", client_po.internal_order_no),
+        ("Client PO Reference", client_po.client_po_number),
+        ("PO Date", str(client_po.po_date)),
+        ("Status", client_po.get_status_display()),
+    ]
+    if client_po.quotation:
+        info_rows.append(("Quotation Ref.", client_po.quotation.quote_no))
+    story.append(_info_table(info_rows))
+    story.append(Spacer(1, 8 * mm))
+
+    # Line items
+    line_data = [["#", "Description", "Qty", "Unit Price", "Total"]]
+    items = client_po.items.all()
+    if items:
+        for idx, item in enumerate(items, start=1):
+            line_data.append([
+                str(idx),
+                item.description,
+                f"{item.quantity}",
+                _format_currency(item.unit_price),
+                _format_currency(item.total),
+            ])
+    else:
+        line_data.append([
+            "1",
+            "Order value (no itemized breakdown)",
+            "1",
+            _format_currency(client_po.total_value),
+            _format_currency(client_po.total_value),
+        ])
+
+    line_table = Table(line_data, colWidths=[10 * mm, 80 * mm, 15 * mm, 30 * mm, 35 * mm])
+    line_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(line_table)
+    story.append(Spacer(1, 4 * mm))
+
+    total_data = [
+        ["", "TOTAL", _format_currency(client_po.total_value)],
+    ]
+    total_table = Table(total_data, colWidths=[95 * mm, 30 * mm, 35 * mm])
+    total_table.setStyle(TableStyle([
+        ('FONTNAME', (1, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+        ('TEXTCOLOR', (1, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('LINEABOVE', (1, 0), (-1, 0), 1, colors.HexColor('#1e3a8a')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(total_table)
+
+    if client_po.user_requirements:
+        story.append(Spacer(1, 10 * mm))
+        styles = getSampleStyleSheet()
+        note_style = ParagraphStyle(
+            'Note',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.HexColor('#1e293b'),
+        )
+        story.append(Paragraph("<b>User Requirements</b>", note_style))
+        story.append(Paragraph(client_po.user_requirements, note_style))
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer
