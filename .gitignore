@@ -1,0 +1,32 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+ENV/
+.pytest_cache/
+
+# Django
+*.log
+db.sqlite3
+/media/
+/staticfiles/
+.env
+
+# Large binaries — never commit installers
+*.exe
+*.msi
+*.dmg
+*.zip
+*.tar.gz
+*.rar
+postgresql*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
