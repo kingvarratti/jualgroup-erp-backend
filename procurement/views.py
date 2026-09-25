@@ -4,7 +4,10 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Sum, Count
+from django.db.models.functions import TruncMonth
+from django.utils import timezone
+from datetime import timedelta
 from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import (
@@ -33,10 +36,13 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
     ordering_fields = ['part_number', 'quantity_on_hand', 'category', 'created_at']
 
     def get_permissions(self):
-        # Anyone authenticated can READ
+        # Reports: exclusive to Stores/Admin
+        if self.action == 'reports':
+            return [IsAuthenticated(), IsStores()]
+        # Read actions: any authenticated user
         if self.action in ['list', 'retrieve', 'reorder_alerts', 'low_stock', 'out_of_stock', 'stats']:
             return [IsAuthenticated()]
-        # Only Stores/Supply Chain can WRITE
+        # Write actions: Stores only
         return [IsAuthenticated(), IsStores()]
 
     @action(detail=False, methods=['get'])
@@ -73,7 +79,6 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
         total_value = sum(
             (i.quantity_on_hand * i.unit_cost for i in qs), start=0
         )
-        # Category breakdown
         by_category = {}
         for item in qs:
             cat = item.get_category_display()
@@ -85,6 +90,97 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             'in_stock': total - low - out,
             'total_value': float(total_value),
             'by_category': by_category,
+        })
+
+    @action(detail=False, methods=['get'])
+    def reports(self, request):
+        qs = self.get_queryset().filter(is_active=True)
+
+        # Category breakdown
+        by_category = []
+        for cat_code, cat_label in InventoryItem.CATEGORY_CHOICES:
+            cat_items = qs.filter(category=cat_code)
+            count = cat_items.count()
+            if count == 0:
+                continue
+            value = sum((i.quantity_on_hand * i.unit_cost for i in cat_items), start=0)
+            by_category.append({
+                'category': cat_label,
+                'code': cat_code,
+                'count': count,
+                'value': float(value),
+            })
+        by_category.sort(key=lambda x: x['value'], reverse=True)
+
+        # Summary
+        total_value = sum((i.quantity_on_hand * i.unit_cost for i in qs), start=0)
+        total_items = qs.count()
+        total_units = sum((i.quantity_on_hand for i in qs), start=0)
+
+        # Top 10 highest value
+        top_value = []
+        for item in qs:
+            val = item.quantity_on_hand * item.unit_cost
+            top_value.append({
+                'part_number': item.part_number,
+                'description': item.description,
+                'quantity': float(item.quantity_on_hand),
+                'unit_cost': float(item.unit_cost),
+                'value': float(val),
+                'category': item.get_category_display(),
+            })
+        top_value.sort(key=lambda x: x['value'], reverse=True)
+        top_value = top_value[:10]
+
+        # Top 10 low stock
+        low_items = []
+        for item in qs:
+            if item.quantity_on_hand <= item.reorder_level:
+                shortfall = item.reorder_level - item.quantity_on_hand
+                low_items.append({
+                    'part_number': item.part_number,
+                    'description': item.description,
+                    'quantity': float(item.quantity_on_hand),
+                    'reorder_level': float(item.reorder_level),
+                    'shortfall': float(shortfall),
+                    'category': item.get_category_display(),
+                    'status': item.stock_status,
+                })
+        low_items.sort(key=lambda x: x['shortfall'], reverse=True)
+        top_low = low_items[:10]
+
+        # Movements (6 months)
+        six_months_ago = timezone.now() - timedelta(days=180)
+        movements = (
+            WarehouseMovement.objects
+            .filter(timestamp__gte=six_months_ago)
+            .annotate(month=TruncMonth('timestamp'))
+            .values('month', 'movement_type')
+            .annotate(total=Sum('quantity'))
+            .order_by('month')
+        )
+        by_month = {}
+        for m in movements:
+            month_key = m['month'].strftime('%b %Y') if m['month'] else 'Unknown'
+            if month_key not in by_month:
+                by_month[month_key] = {'month': month_key, 'in': 0, 'out': 0}
+            qty = float(m['total'] or 0)
+            if m['movement_type'] == 'IN':
+                by_month[month_key]['in'] += qty
+            elif m['movement_type'] == 'OUT':
+                by_month[month_key]['out'] += qty
+
+        return Response({
+            'summary': {
+                'total_items': total_items,
+                'total_units': float(total_units),
+                'total_value': float(total_value),
+                'avg_unit_cost': float(total_value / total_units) if total_units > 0 else 0,
+            },
+            'by_category': by_category,
+            'top_value_items': top_value,
+            'top_low_stock': top_low,
+            'movements': list(by_month.values()),
         })
 
 
@@ -128,7 +224,7 @@ class StockRequisitionViewSet(viewsets.ModelViewSet):
                 )
             except StockRequisitionItem.DoesNotExist:
                 continue
-                # Refresh from DB so we see the updated quantities
+
         requisition.refresh_from_db()
         all_issued = all(
             i.quantity_issued >= i.quantity_requested
@@ -137,6 +233,7 @@ class StockRequisitionViewSet(viewsets.ModelViewSet):
         requisition.status = 'ISSUED' if all_issued else 'PARTIALLY_ISSUED'
         requisition.save()
         return Response(StockRequisitionSerializer(requisition).data)
+
 
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
@@ -235,4 +332,5 @@ class WarehouseMovementViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = WarehouseMovement.objects.all().select_related('item', 'performed_by')
     serializer_class = WarehouseMovementSerializer
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
     filterset_fields = ['movement_type', 'item']
