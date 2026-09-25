@@ -27,15 +27,65 @@ from core.permissions import IsStores, IsSupplyChain, IsFinance
 class InventoryItemViewSet(viewsets.ModelViewSet):
     queryset = InventoryItem.objects.all()
     serializer_class = InventoryItemSerializer
-    permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['category', 'is_active']
-    search_fields = ['part_number', 'description']
+    filterset_fields = ['category', 'is_active', 'manufacturer']
+    search_fields = ['part_number', 'description', 'location', 'bin_number']
+    ordering_fields = ['part_number', 'quantity_on_hand', 'category', 'created_at']
+
+    def get_permissions(self):
+        # Anyone authenticated can READ
+        if self.action in ['list', 'retrieve', 'reorder_alerts', 'low_stock', 'out_of_stock', 'stats']:
+            return [IsAuthenticated()]
+        # Only Stores/Supply Chain can WRITE
+        return [IsAuthenticated(), IsStores()]
 
     @action(detail=False, methods=['get'])
     def reorder_alerts(self, request):
-        items = self.get_queryset().filter(is_active=True, quantity_on_hand__lte=F('reorder_level'))
+        items = self.get_queryset().filter(
+            is_active=True, quantity_on_hand__lte=F('reorder_level')
+        )
         return Response(InventoryItemSerializer(items, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def low_stock(self, request):
+        items = self.get_queryset().filter(
+            is_active=True,
+            quantity_on_hand__gt=0,
+            quantity_on_hand__lte=F('reorder_level'),
+        )
+        return Response(InventoryItemSerializer(items, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def out_of_stock(self, request):
+        items = self.get_queryset().filter(
+            is_active=True, quantity_on_hand__lte=0
+        )
+        return Response(InventoryItemSerializer(items, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = self.get_queryset().filter(is_active=True)
+        total = qs.count()
+        low = qs.filter(
+            quantity_on_hand__gt=0, quantity_on_hand__lte=F('reorder_level')
+        ).count()
+        out = qs.filter(quantity_on_hand__lte=0).count()
+        total_value = sum(
+            (i.quantity_on_hand * i.unit_cost for i in qs), start=0
+        )
+        # Category breakdown
+        by_category = {}
+        for item in qs:
+            cat = item.get_category_display()
+            by_category[cat] = by_category.get(cat, 0) + 1
+        return Response({
+            'total_items': total,
+            'low_stock': low,
+            'out_of_stock': out,
+            'in_stock': total - low - out,
+            'total_value': float(total_value),
+            'by_category': by_category,
+        })
 
 
 class StockRequisitionViewSet(viewsets.ModelViewSet):

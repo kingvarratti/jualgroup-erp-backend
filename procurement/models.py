@@ -5,26 +5,65 @@ from sales.models import ClientPO
 
 
 class InventoryItem(models.Model):
+    CATEGORY_CHOICES = (
+        ('ABB', 'ABB Products'),
+        ('PUMPS', 'Pumps'),
+        ('VALVES', 'Valves'),
+        ('INSTRUMENTATION', 'Instrumentation'),
+        ('ELECTRICAL', 'Electrical'),
+        ('MECHANICAL', 'Mechanical'),
+        ('SPARES', 'Spare Parts'),
+        ('OTHER', 'Other'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    part_number = models.CharField(max_length=100, unique=True)
+    part_number = models.CharField(max_length=100, unique=True, db_index=True)
     description = models.CharField(max_length=300)
+    manufacturer = models.CharField(max_length=100, blank=True, default='ABB')
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='ABB')
     uom = models.CharField(max_length=20, help_text='Unit of Measure')
     quantity_on_hand = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     reorder_level = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     safety_stock = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    unit_price = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        help_text='Selling price (optional)'
+    )
     location = models.CharField(max_length=100, blank=True, help_text='Shelf/Rack')
-    category = models.CharField(max_length=100, blank=True)
+    bin_number = models.CharField(max_length=50, blank=True)
+    datasheet = models.FileField(upload_to='datasheets/%Y/%m/', null=True, blank=True)
+    notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['part_number']
+        indexes = [
+            models.Index(fields=['part_number']),
+            models.Index(fields=['category']),
+        ]
 
     @property
     def needs_reorder(self):
         return self.quantity_on_hand <= self.reorder_level
+
+    @property
+    def is_out_of_stock(self):
+        return self.quantity_on_hand <= 0
+
+    @property
+    def stock_status(self):
+        if self.quantity_on_hand <= 0:
+            return 'OUT_OF_STOCK'
+        if self.quantity_on_hand <= self.reorder_level:
+            return 'LOW_STOCK'
+        return 'IN_STOCK'
+
+    @property
+    def stock_value(self):
+        return self.quantity_on_hand * self.unit_cost
 
     def __str__(self):
         return f"{self.part_number} - {self.description}"

@@ -10,6 +10,14 @@ from .models import (
 
 class InventoryItemSerializer(serializers.ModelSerializer):
     needs_reorder = serializers.BooleanField(read_only=True)
+    is_out_of_stock = serializers.BooleanField(read_only=True)
+    stock_status = serializers.CharField(read_only=True)
+    stock_value = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True
+    )
 
     class Meta:
         model = InventoryItem
