@@ -20,6 +20,9 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 
 class PaymentVoucherSerializer(serializers.ModelSerializer):
+    prepared_by_name = serializers.CharField(source='prepared_by.get_full_name', read_only=True)
+    authorized_by_name = serializers.CharField(source='authorized_by.get_full_name', read_only=True)
+
     class Meta:
         model = PaymentVoucher
         fields = '__all__'
@@ -27,9 +30,12 @@ class PaymentVoucherSerializer(serializers.ModelSerializer):
 
 
 class PVFilingSerializer(serializers.ModelSerializer):
+    filed_by_name = serializers.CharField(source='filed_by.get_full_name', read_only=True)
+
     class Meta:
         model = PVFiling
         fields = '__all__'
+        read_only_fields = ['id', 'filed_by']
 
 
 class PVAuthorizationSerializer(serializers.ModelSerializer):
@@ -53,6 +59,8 @@ class StatementOfAccountSerializer(serializers.ModelSerializer):
 
 
 class SOASubmissionSerializer(serializers.ModelSerializer):
+    submitted_by_name = serializers.CharField(source='submitted_by.get_full_name', read_only=True)
+
     class Meta:
         model = SOASubmission
         fields = '__all__'

@@ -542,3 +542,141 @@ def generate_purchase_order_pdf(purchase_order):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
+
+
+
+def generate_soa_pdf(soa):
+    from finance.models import Invoice, Payment
+
+    buffer = io.BytesIO()
+    doc = _build_doc(buffer, f"SOA {soa.soa_no}")
+    story = []
+
+    _company_header(story)
+    _doc_title(
+        story,
+        f"STATEMENT OF ACCOUNT",
+        f"{soa.soa_no}  |  {soa.client_name}  |  {soa.period_start} to {soa.period_end}",
+    )
+
+    info_rows = [
+        ("Client", soa.client_name),
+        ("Statement No.", soa.soa_no),
+        ("Period", f"{soa.period_start} to {soa.period_end}"),
+        ("Currency", soa.currency),
+        ("Status", soa.status),
+    ]
+    story.append(_info_table(info_rows))
+    story.append(Spacer(1, 8 * mm))
+
+    # Fetch transactions
+    invoices = Invoice.objects.filter(
+        client_po__quotation__enquiry__client_name__iexact=soa.client_name,
+        issue_date__gte=soa.period_start,
+        issue_date__lte=soa.period_end,
+    ).order_by('issue_date')
+
+    payments = Payment.objects.filter(
+        invoice__client_po__quotation__enquiry__client_name__iexact=soa.client_name,
+        payment_date__gte=soa.period_start,
+        payment_date__lte=soa.period_end,
+    ).select_related('invoice').order_by('payment_date')
+
+    # Build transactions list
+    txns = []
+    for inv in invoices:
+        txns.append({
+            'date': inv.issue_date,
+            'ref': inv.invoice_no,
+            'description': f"Invoice — {inv.invoice_no}",
+            'debit': inv.total_amount,
+            'credit': 0,
+        })
+    for pay in payments:
+        txns.append({
+            'date': pay.payment_date,
+            'ref': pay.receipt_no,
+            'description': f"Payment received — {pay.payment_method} ({pay.invoice.invoice_no})",
+            'debit': 0,
+            'credit': pay.amount,
+        })
+    txns.sort(key=lambda x: x['date'])
+
+    # Opening balance row
+    line_data = [["Date", "Reference", "Description", "Debit", "Credit", "Balance"]]
+    running = soa.opening_balance
+    line_data.append([
+        str(soa.period_start),
+        "—",
+        "Opening Balance",
+        "—",
+        "—",
+        _format_currency(running, soa.currency),
+    ])
+
+    for t in txns:
+        running = running + t['debit'] - t['credit']
+        line_data.append([
+            str(t['date']),
+            t['ref'],
+            t['description'][:60],
+            _format_currency(t['debit'], soa.currency) if t['debit'] else '—',
+            _format_currency(t['credit'], soa.currency) if t['credit'] else '—',
+            _format_currency(running, soa.currency),
+        ])
+
+    line_table = Table(
+        line_data,
+        colWidths=[22 * mm, 22 * mm, 60 * mm, 22 * mm, 22 * mm, 22 * mm],
+    )
+    line_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(line_table)
+    story.append(Spacer(1, 5 * mm))
+
+    # Summary
+    summary_data = [
+        ["Opening Balance", _format_currency(soa.opening_balance, soa.currency)],
+        ["Invoices Issued (Debits)", _format_currency(soa.total_debits, soa.currency)],
+        ["Payments Received (Credits)", _format_currency(soa.total_credits, soa.currency)],
+        ["CLOSING BALANCE", _format_currency(soa.closing_balance, soa.currency)],
+    ]
+    summary_table = Table(summary_data, colWidths=[120 * mm, 45 * mm])
+    summary_table.setStyle(TableStyle([
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('FONTNAME', (0, 3), (-1, 3), 'Helvetica-Bold'),
+        ('TEXTCOLOR', (0, 3), (-1, 3), colors.HexColor('#1e3a8a')),
+        ('LINEABOVE', (0, 3), (-1, 3), 1, colors.HexColor('#1e3a8a')),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(summary_table)
+
+    story.append(Spacer(1, 15 * mm))
+    styles = getSampleStyleSheet()
+    footer_note = ParagraphStyle(
+        'FooterNote',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=colors.grey,
+    )
+    story.append(Paragraph(
+        "Please note: If payment has been made recently, kindly disregard this statement.<br/>"
+        "For any queries, contact: accounts@jualgroup.com",
+        footer_note,
+    ))
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer
