@@ -6,7 +6,7 @@ from .models import (
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
-    StockTransferRequest, StockTransferItem, InternalMovement,
+    StockTransferRequest, StockTransferItem, InternalMovement, CannibalizationRequest, CannibalizationItem,
 )
 
 
@@ -405,5 +405,80 @@ class InternalMovementSerializer(serializers.ModelSerializer):
             'moved_by', 'moved_at', 'verified_by', 'verified_at',
             'created_at', 'updated_at',
         ]
+
+
+
+
+class CannibalizationItemSerializer(serializers.ModelSerializer):
+    part_item_detail = InventoryItemSerializer(source='part_item', read_only=True)
+
+    class Meta:
+        model = CannibalizationItem
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class CannibalizationRequestSerializer(serializers.ModelSerializer):
+    items = CannibalizationItemSerializer(many=True, read_only=True)
+    parent_item_detail = InventoryItemSerializer(source='parent_item', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
+    completed_by_name = serializers.CharField(source='completed_by.get_full_name', read_only=True)
+    reason_display = serializers.CharField(source='get_reason_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    item_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CannibalizationRequest
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'request_no', 'status',
+            'requested_by', 'approved_by', 'approved_at',
+            'rejected_by', 'rejected_at', 'completed_by', 'completed_at',
+            'created_at', 'updated_at',
+        ]
+
+    def get_item_count(self, obj):
+        return obj.items.count()
+
+
+class CannibalizationRequestCreateSerializer(serializers.ModelSerializer):
+    items = serializers.JSONField(write_only=True, required=False)
+
+    class Meta:
+        model = CannibalizationRequest
+        fields = [
+            'id', 'parent_item', 'parent_serial', 'parent_location',
+            'branch', 'reason', 'reason_notes', 'notes', 'items',
+        ]
+
+    def create(self, validated_data):
+        import json
+        items_data = validated_data.pop('items', [])
+        if isinstance(items_data, str):
+            try:
+                items_data = json.loads(items_data)
+            except Exception:
+                items_data = []
+
+        user = self.context['request'].user
+        req = CannibalizationRequest.objects.create(requested_by=user, **validated_data)
+
+        for i in (items_data or []):
+            CannibalizationItem.objects.create(
+                cannibalization=req,
+                part_item_id=i.get('part_item') or None,
+                part_number=i.get('part_number', ''),
+                description=i.get('description', ''),
+                quantity=i.get('quantity', 1),
+                uom=i.get('uom', 'pcs'),
+                destination=i.get('destination', 'STOCK'),
+                remarks=i.get('remarks', ''),
+            )
+        return req
+
+
 
 

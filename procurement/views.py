@@ -16,7 +16,7 @@ from .models import (
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
-    StockTransferRequest, StockTransferItem,InternalMovement,
+    StockTransferRequest, StockTransferItem,InternalMovement, CannibalizationRequest, CannibalizationItem,
 )
 
 from .serializers import (
@@ -28,7 +28,9 @@ from .serializers import (
     WarehouseMovementSerializer, EnquirySourcingSerializer,
     RequisitionRequestSerializer, RequisitionRequestCreateSerializer,
     RequisitionItemSerializer,    StockTransferRequestSerializer, StockTransferRequestCreateSerializer,
-    StockTransferItemSerializer, InternalMovementSerializer,
+    StockTransferItemSerializer, InternalMovementSerializer,     InternalMovementSerializer,
+    CannibalizationRequestSerializer, CannibalizationRequestCreateSerializer,
+    CannibalizationItemSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
 from sales.models import Enquiry
@@ -1404,3 +1406,158 @@ class InternalMovementViewSet(viewsets.ModelViewSet):
             'moved': qs.filter(status='MOVED').count(),
             'verified': qs.filter(status='VERIFIED').count(),
         })
+
+
+
+
+class CannibalizationRequestViewSet(viewsets.ModelViewSet):
+    queryset = CannibalizationRequest.objects.all().select_related(
+        'parent_item', 'branch', 'requested_by', 'approved_by',
+    ).prefetch_related('items')
+    serializer_class = CannibalizationRequestSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'branch', 'reason', 'parent_item']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CannibalizationRequestCreateSerializer
+        return CannibalizationRequestSerializer
+
+    def get_permissions(self):
+        if self.action in ['approve', 'reject', 'complete']:
+            return [IsAuthenticated(), IsStores()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        req = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='CANNIBALIZATION',
+            reference_id=req.request_no,
+        )
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Only REQUESTED can be approved'}, status=400)
+        req.status = 'APPROVED'
+        req.approved_by = request.user
+        req.approved_at = timezone.now()
+        req.save()
+        return Response(CannibalizationRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Only REQUESTED can be rejected'}, status=400)
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason required'}, status=400)
+        req.status = 'REJECTED'
+        req.rejected_by = request.user
+        req.rejected_at = timezone.now()
+        req.rejection_reason = reason
+        req.save()
+        return Response(CannibalizationRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def complete(self, request, pk=None):
+        """Complete the cannibalization — redistribute parts to stock/reorder/scrap."""
+        from django.utils import timezone
+        from decimal import Decimal
+
+        req = self.get_object()
+        if req.status != 'APPROVED':
+            return Response({'error': 'Only APPROVED can be completed'}, status=400)
+
+        reorder_parts = []
+
+        for req_item in req.items.all():
+            req_item.is_removed = True
+            req_item.save()
+
+            # If part goes back to stock and links to inventory
+            if req_item.destination == 'STOCK' and req_item.part_item:
+                try:
+                    bs, _ = BranchStock.objects.get_or_create(
+                        item=req_item.part_item,
+                        branch=req.branch,
+                        defaults={'quantity_on_hand': 0},
+                    )
+                    bs.quantity_on_hand += Decimal(str(req_item.quantity))
+                    bs.save()
+
+                    # Also increment master quantity
+                    req_item.part_item.quantity_on_hand += Decimal(str(req_item.quantity))
+                    req_item.part_item.save()
+
+                    WarehouseMovement.objects.create(
+                        item=req_item.part_item,
+                        movement_type='IN',
+                        quantity=req_item.quantity,
+                        reference=req.request_no,
+                        reason=f"Salvaged from {req.parent_item.part_number}",
+                        performed_by=request.user,
+                    )
+                except Exception:
+                    pass
+
+            # If part needs reordering
+            elif req_item.destination == 'REORDER':
+                reorder_parts.append({
+                    'part_number': req_item.part_number,
+                    'description': req_item.description,
+                    'quantity': float(req_item.quantity),
+                })
+
+        # Reduce parent quantity if a serial number wasn't tracked
+        # (parent stock reduction is optional — we assume it's kept as a record)
+
+        # Create a single RFQ for reorder parts
+        rfq_created = None
+        if reorder_parts and req.parent_item:
+            try:
+                rfq = SupplierRFQ.objects.create(
+                    rfq_no=f"RFQ-{uuid.uuid4().hex[:8].upper()}",
+                    item_description='\n'.join(
+                        [f"• {p['part_number']} — {p['description']} (Qty: {p['quantity']})" for p in reorder_parts]
+                    ),
+                    quantity=sum(p['quantity'] for p in reorder_parts),
+                    sourcing_type='LOCAL',
+                    status='DRAFT',
+                    notes=f"Auto-created from cannibalization {req.request_no} of {req.parent_item.part_number}",
+                    created_by=request.user,
+                )
+                rfq_created = rfq.rfq_no
+            except Exception:
+                pass
+
+        req.status = 'COMPLETED'
+        req.completed_by = request.user
+        req.completed_at = timezone.now()
+        req.completion_notes = request.data.get('notes', '')
+        req.save()
+
+        return Response({
+            'request': CannibalizationRequestSerializer(req).data,
+            'rfq_created': rfq_created,
+            'parts_salvaged': sum(1 for i in req.items.all() if i.destination == 'STOCK'),
+            'parts_for_reorder': len(reorder_parts),
+        })
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = CannibalizationRequest.objects.all()
+        return Response({
+            'requested': qs.filter(status='REQUESTED').count(),
+            'approved': qs.filter(status='APPROVED').count(),
+            'completed': qs.filter(status='COMPLETED').count(),
+            'rejected': qs.filter(status='REJECTED').count(),
+        })
+
+

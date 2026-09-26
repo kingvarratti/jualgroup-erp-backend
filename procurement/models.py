@@ -889,3 +889,117 @@ class InternalMovement(models.Model):
 
     def __str__(self):
         return f"{self.movement_no} — {self.item.part_number} @ {self.branch.name}"
+
+    
+
+class CannibalizationRequest(models.Model):
+    """
+    Request to remove parts from a parent equipment for reuse in other repairs.
+    """
+    REASON = (
+        ('REPAIR', 'Emergency Repair'),
+        ('PROJECT', 'Project Requirement'),
+        ('SALVAGE', 'Salvage Usable Parts'),
+        ('DISPOSAL', 'Pre-Disposal Harvesting'),
+        ('OTHER', 'Other'),
+    )
+
+    STATUS = (
+        ('REQUESTED', 'Requested'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_no = models.CharField(max_length=30, unique=True, editable=False)
+
+    parent_item = models.ForeignKey(
+        InventoryItem, on_delete=models.PROTECT,
+        related_name='cannibalization_parent',
+        help_text='The equipment being dismantled',
+    )
+    parent_serial = models.CharField(
+        max_length=100, blank=True,
+        help_text='Serial number of the specific unit (if tracked)',
+    )
+    parent_location = models.CharField(max_length=100, blank=True)
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='cannibalizations',
+    )
+
+    reason = models.CharField(max_length=20, choices=REASON)
+    reason_notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS, default='REQUESTED')
+
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='cannibalizations_requested',
+    )
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cannibalizations_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cannibalizations_rejected',
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+
+    completed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cannibalizations_completed',
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    completion_notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Cannibalization Request'
+        verbose_name_plural = 'Cannibalization Requests'
+
+    def save(self, *args, **kwargs):
+        if not self.request_no:
+            self.request_no = f"CAN-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.request_no} — {self.parent_item.part_number}"
+
+
+class CannibalizationItem(models.Model):
+    """Part being removed from the parent equipment."""
+    DESTINATION = (
+        ('STOCK', 'Return to Stock'),
+        ('REORDER', 'Send to Supply Chain for Reorder'),
+        ('SCRAP', 'Scrap / Dispose'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cannibalization = models.ForeignKey(
+        CannibalizationRequest, on_delete=models.CASCADE, related_name='items',
+    )
+    part_item = models.ForeignKey(
+        InventoryItem, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cannibalization_parts',
+        help_text='Link to inventory item if the part is stocked',
+    )
+    part_number = models.CharField(max_length=100)
+    description = models.CharField(max_length=300)
+    quantity = models.DecimalField(max_digits=14, decimal_places=2, default=1)
+    uom = models.CharField(max_length=20, default='pcs')
+    destination = models.CharField(max_length=20, choices=DESTINATION, default='STOCK')
+    is_removed = models.BooleanField(default=False)
+    remarks = models.CharField(max_length=200, blank=True)
+
+    def __str__(self):
+        return f"{self.part_number} x {self.quantity}"

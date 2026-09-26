@@ -5,7 +5,7 @@ from .views import (
     SupplierViewSet, SupplierRFQViewSet, SupplierQuoteViewSet, PurchaseOrderViewSet,
     GoodsReceivedNoteViewSet, SupplierPaymentViewSet, WarehouseMovementViewSet,
     EnquirySourcingViewSet, RequisitionRequestViewSet, StockTransferRequestViewSet,
-    InternalMovementViewSet,
+    InternalMovementViewSet, CannibalizationRequestViewSet,
 )
 
 router = DefaultRouter()
@@ -15,6 +15,7 @@ router.register('stock-requisitions', StockRequisitionViewSet)
 router.register('requisitions', RequisitionRequestViewSet, basename='requisition')
 router.register('transfers', StockTransferRequestViewSet, basename='transfer')
 router.register('internal-movements', InternalMovementViewSet, basename='internal-movement')
+router.register('cannibalizations', CannibalizationRequestViewSet, basename='cannibalization')
 router.register('suppliers', SupplierViewSet)
 router.register('rfqs', SupplierRFQViewSet)
 router.register('supplier-quotes', SupplierQuoteViewSet)
