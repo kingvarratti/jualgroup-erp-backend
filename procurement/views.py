@@ -21,7 +21,8 @@ from .serializers import (
     InventoryItemSerializer, StockRequisitionSerializer, StockRequisitionItemSerializer,
     SupplierSerializer, SupplierRFQSerializer, SupplierQuoteSerializer,
     PurchaseOrderSerializer, PurchaseOrderCreateSerializer, PurchaseOrderItemSerializer,
-    GoodsReceivedNoteSerializer, SupplierPaymentSerializer, WarehouseMovementSerializer,
+    GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
+    WarehouseMovementSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
 from core.permissions import IsStores, IsSupplyChain, IsFinance
@@ -479,24 +480,49 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         po.save()
         return Response(PurchaseOrderSerializer(po).data)
 
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_purchase_order_pdf
+        po = self.get_object()
+        buffer = generate_purchase_order_pdf(po)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{po.po_no}.pdf",
+            content_type='application/pdf',
+        )
+
+        
+
 
 class GoodsReceivedNoteViewSet(viewsets.ModelViewSet):
-    queryset = GoodsReceivedNote.objects.all().prefetch_related('items')
+    queryset = GoodsReceivedNote.objects.all().select_related('po', 'received_by').prefetch_related('items')
     serializer_class = GoodsReceivedNoteSerializer
     permission_classes = [IsAuthenticated, IsStores]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['po']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return GRNCreateSerializer
+        return GoodsReceivedNoteSerializer
 
     @transaction.atomic
     def perform_create(self, serializer):
-        grn = serializer.save(received_by=self.request.user)
+        grn = serializer.save()
         for grn_item in grn.items.all():
             po_item = grn_item.po_item
             if po_item.item:
                 po_item.item.quantity_on_hand += grn_item.quantity_received
                 po_item.item.save()
                 WarehouseMovement.objects.create(
-                    item=po_item.item, movement_type='IN',
+                    item=po_item.item,
+                    movement_type='IN',
                     quantity=grn_item.quantity_received,
-                    reference=grn.grn_no, performed_by=self.request.user,
+                    reference=grn.grn_no,
+                    reason=f"GRN received against PO {grn.po.po_no}",
+                    performed_by=self.request.user,
                 )
 
 

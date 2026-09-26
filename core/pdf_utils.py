@@ -420,3 +420,125 @@ def generate_client_po_pdf(client_po):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
+
+
+
+def generate_purchase_order_pdf(purchase_order):
+    buffer = io.BytesIO()
+    doc = _build_doc(buffer, f"Purchase Order {purchase_order.po_no}")
+    story = []
+
+    _company_header(story)
+    _doc_title(
+        story,
+        f"PURCHASE ORDER {purchase_order.po_no}",
+        f"Date: {purchase_order.created_at.date()}  |  Status: {purchase_order.get_status_display()}",
+    )
+
+    # Supplier info
+    supplier = purchase_order.supplier
+    info_rows = [
+        ("Supplier", supplier.name),
+        ("Contact", supplier.contact_person or '—'),
+        ("Email", supplier.email or '—'),
+        ("Phone", supplier.phone or '—'),
+        ("Country", supplier.country or '—'),
+    ]
+    story.append(_info_table(info_rows))
+    story.append(Spacer(1, 4 * mm))
+
+    # Client PO reference
+    if purchase_order.client_po:
+        story.append(Spacer(1, 2 * mm))
+        ref_rows = [
+            ("Client PO Ref.", purchase_order.client_po.internal_order_no),
+            ("Expected Delivery", str(purchase_order.expected_delivery or '—')),
+            ("Currency", purchase_order.currency),
+        ]
+        story.append(_info_table(ref_rows))
+
+    story.append(Spacer(1, 8 * mm))
+
+    # Line items
+    line_data = [["#", "Description", "Qty", "Unit Price", "Total"]]
+    items = purchase_order.items.all()
+    if items:
+        for idx, item in enumerate(items, start=1):
+            line_data.append([
+                str(idx),
+                item.description,
+                f"{item.quantity}",
+                _format_currency(item.unit_price, purchase_order.currency),
+                _format_currency(item.total, purchase_order.currency),
+            ])
+    else:
+        line_data.append([
+            "1",
+            "Purchase order value (no itemized breakdown)",
+            "1",
+            _format_currency(purchase_order.total_cost, purchase_order.currency),
+            _format_currency(purchase_order.total_cost, purchase_order.currency),
+        ])
+
+    line_table = Table(line_data, colWidths=[10 * mm, 80 * mm, 15 * mm, 30 * mm, 35 * mm])
+    line_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(line_table)
+    story.append(Spacer(1, 4 * mm))
+
+    # Total
+    total_data = [
+        ["", "TOTAL", _format_currency(purchase_order.total_cost, purchase_order.currency)],
+    ]
+    total_table = Table(total_data, colWidths=[95 * mm, 30 * mm, 35 * mm])
+    total_table.setStyle(TableStyle([
+        ('FONTNAME', (1, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+        ('TEXTCOLOR', (1, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('LINEABOVE', (1, 0), (-1, 0), 1, colors.HexColor('#1e3a8a')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(total_table)
+
+    if purchase_order.notes:
+        story.append(Spacer(1, 10 * mm))
+        styles = getSampleStyleSheet()
+        note_style = ParagraphStyle(
+            'Note',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.HexColor('#1e293b'),
+        )
+        story.append(Paragraph("<b>Notes</b>", note_style))
+        story.append(Paragraph(purchase_order.notes, note_style))
+
+    # Footer
+    story.append(Spacer(1, 12 * mm))
+    styles = getSampleStyleSheet()
+    footer_style = ParagraphStyle(
+        'FooterNote',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.grey,
+        alignment=TA_CENTER,
+    )
+    story.append(Paragraph(
+        "This is a computer-generated Purchase Order. Please quote the PO number on all correspondence.",
+        footer_style,
+    ))
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer

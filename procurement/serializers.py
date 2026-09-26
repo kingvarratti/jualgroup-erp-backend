@@ -112,19 +112,58 @@ class PurchaseOrderCreateSerializer(serializers.ModelSerializer):
 
 
 class GRNItemSerializer(serializers.ModelSerializer):
+    po_item_detail = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = GRNItem
         fields = '__all__'
+        read_only_fields = ['id']
+        extra_kwargs = {
+            'grn': {'required': False, 'allow_null': True},
+        }
+
+    def get_po_item_detail(self, obj):
+        if not obj.po_item:
+            return None
+        return {
+            'id': obj.po_item.id,
+            'description': obj.po_item.description,
+            'quantity': str(obj.po_item.quantity),
+            'unit_price': str(obj.po_item.unit_price),
+        }
 
 
 class GoodsReceivedNoteSerializer(serializers.ModelSerializer):
     items = GRNItemSerializer(many=True, read_only=True)
+    po_no = serializers.CharField(source='po.po_no', read_only=True)
+    received_by_name = serializers.CharField(
+        source='received_by.get_full_name', read_only=True
+    )
 
     class Meta:
         model = GoodsReceivedNote
         fields = '__all__'
         read_only_fields = ['id', 'grn_no', 'received_by', 'received_date']
 
+
+class GRNCreateSerializer(serializers.ModelSerializer):
+    items = GRNItemSerializer(many=True, write_only=True, required=False)
+
+    class Meta:
+        model = GoodsReceivedNote
+        fields = ['id', 'po', 'notes', 'has_discrepancies', 'items']
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        user = self.context['request'].user
+        grn = GoodsReceivedNote.objects.create(received_by=user, **validated_data)
+
+        for item in items_data:
+            item.pop('id', None)
+            item.pop('grn', None)
+            item.pop('po_item_detail', None)
+            GRNItem.objects.create(grn=grn, **item)
+        return grn
 
 class SupplierPaymentSerializer(serializers.ModelSerializer):
     class Meta:
