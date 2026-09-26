@@ -444,19 +444,29 @@ def generate_purchase_order_pdf(purchase_order):
         ("Phone", supplier.phone or '—'),
         ("Country", supplier.country or '—'),
     ]
+    if purchase_order.sourcing_type:
+        info_rows.append(
+            ("Sourcing Type", purchase_order.get_sourcing_type_display())
+        )
     story.append(_info_table(info_rows))
     story.append(Spacer(1, 4 * mm))
 
-    # Client PO reference
+    # Reference + delivery
+    ref_rows = []
     if purchase_order.client_po:
-        story.append(Spacer(1, 2 * mm))
-        ref_rows = [
-            ("Client PO Ref.", purchase_order.client_po.internal_order_no),
-            ("Expected Delivery", str(purchase_order.expected_delivery or '—')),
-            ("Currency", purchase_order.currency),
-        ]
-        story.append(_info_table(ref_rows))
+        ref_rows.append(("Client PO Ref.", purchase_order.client_po.internal_order_no))
+    if purchase_order.rfq:
+        ref_rows.append(("RFQ Ref.", purchase_order.rfq.rfq_no))
+    ref_rows.append(("Expected Delivery", str(purchase_order.expected_delivery or '—')))
+    ref_rows.append(("Currency", purchase_order.currency))
 
+    if purchase_order.order_confirmation_ref:
+        ref_rows.append(("Supplier Confirmation Ref.", purchase_order.order_confirmation_ref))
+        ref_rows.append(
+            ("Confirmation Date", str(purchase_order.order_confirmation_date or '—'))
+        )
+
+    story.append(_info_table(ref_rows))
     story.append(Spacer(1, 8 * mm))
 
     # Line items
@@ -496,22 +506,67 @@ def generate_purchase_order_pdf(purchase_order):
     story.append(line_table)
     story.append(Spacer(1, 4 * mm))
 
-    # Total
-    total_data = [
-        ["", "TOTAL", _format_currency(purchase_order.total_cost, purchase_order.currency)],
-    ]
-    total_table = Table(total_data, colWidths=[95 * mm, 30 * mm, 35 * mm])
+    # Totals
+    total_rows = [["", "Goods Total", _format_currency(purchase_order.total_cost, purchase_order.currency)]]
+    if purchase_order.freight_cost and purchase_order.freight_cost > 0:
+        total_rows.append(
+            ["", "Freight / Shipping", _format_currency(purchase_order.freight_cost, purchase_order.currency)]
+        )
+        grand_total = purchase_order.total_cost + purchase_order.freight_cost
+        total_rows.append(
+            ["", "GRAND TOTAL", _format_currency(grand_total, purchase_order.currency)]
+        )
+    else:
+        total_rows.append(
+            ["", "GRAND TOTAL", _format_currency(purchase_order.total_cost, purchase_order.currency)]
+        )
+
+    total_table = Table(total_rows, colWidths=[95 * mm, 30 * mm, 35 * mm])
     total_table.setStyle(TableStyle([
-        ('FONTNAME', (1, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
         ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-        ('TEXTCOLOR', (1, 0), (-1, 0), colors.HexColor('#1e3a8a')),
-        ('LINEABOVE', (1, 0), (-1, 0), 1, colors.HexColor('#1e3a8a')),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('FONTNAME', (1, -1), (-1, -1), 'Helvetica-Bold'),
+        ('TEXTCOLOR', (1, -1), (-1, -1), colors.HexColor('#1e3a8a')),
+        ('LINEABOVE', (1, -1), (-1, -1), 1, colors.HexColor('#1e3a8a')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
     ]))
     story.append(total_table)
 
+    # Shipping & logistics
+    if purchase_order.carrier or purchase_order.tracking_number or purchase_order.shipping_notes:
+        story.append(Spacer(1, 10 * mm))
+        styles = getSampleStyleSheet()
+        ship_heading = ParagraphStyle(
+            'ShipHead',
+            parent=styles['Heading2'],
+            fontSize=11,
+            textColor=colors.HexColor('#1e3a8a'),
+            spaceAfter=4,
+        )
+        story.append(Paragraph("Shipping & Logistics", ship_heading))
+
+        ship_rows = []
+        if purchase_order.carrier:
+            ship_rows.append(("Carrier", purchase_order.get_carrier_display() or purchase_order.carrier))
+        if purchase_order.carrier_name:
+            ship_rows.append(("Forwarder", purchase_order.carrier_name))
+        if purchase_order.tracking_number:
+            ship_rows.append(("Tracking #", purchase_order.tracking_number))
+        if ship_rows:
+            story.append(_info_table(ship_rows))
+
+        if purchase_order.shipping_notes:
+            ship_note = ParagraphStyle(
+                'ShipNote',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=colors.HexColor('#334155'),
+            )
+            story.append(Spacer(1, 2 * mm))
+            story.append(Paragraph(purchase_order.shipping_notes, ship_note))
+
+    # General notes
     if purchase_order.notes:
         story.append(Spacer(1, 10 * mm))
         styles = getSampleStyleSheet()
@@ -542,7 +597,6 @@ def generate_purchase_order_pdf(purchase_order):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
-
 
 
 def generate_soa_pdf(soa):

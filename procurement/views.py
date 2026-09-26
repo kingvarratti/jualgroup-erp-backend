@@ -588,6 +588,66 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         po.save()
         return Response(PurchaseOrderSerializer(po).data)
 
+    @action(detail=True, methods=['post'])
+    def confirm_order(self, request, pk=None):
+        """Record supplier order confirmation."""
+        po = self.get_object()
+
+        ref = (request.data.get('order_confirmation_ref') or '').strip()
+        date_str = request.data.get('order_confirmation_date') or ''
+        notes = (request.data.get('notes') or '').strip()
+        confirmation_file = request.FILES.get('order_confirmation_file')
+
+        if not ref:
+            return Response(
+                {'error': 'order_confirmation_ref is required'},
+                status=400,
+            )
+
+        po.order_confirmation_ref = ref
+        if date_str:
+            try:
+                po.order_confirmation_date = date_str
+            except Exception:
+                pass
+        if confirmation_file:
+            po.order_confirmation_file = confirmation_file
+
+        if notes:
+            po.notes = (po.notes + '\n' + notes).strip()
+
+        po.status = 'CONFIRMED'
+        po.save()
+
+        return Response(PurchaseOrderSerializer(po).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_in_transit(self, request, pk=None):
+        """Mark PO as in transit with tracking details."""
+        po = self.get_object()
+
+        if po.status not in ['CONFIRMED', 'SENT', 'APPROVED']:
+            return Response(
+                {'error': 'PO must be CONFIRMED, SENT, or APPROVED to mark as in transit'},
+                status=400,
+            )
+
+        tracking = request.data.get('tracking_number')
+        carrier = request.data.get('carrier')
+        carrier_name = request.data.get('carrier_name')
+
+        if tracking is not None:
+            po.tracking_number = tracking.strip() if tracking else ''
+        if carrier is not None:
+            po.carrier = carrier
+        if carrier_name is not None:
+            po.carrier_name = carrier_name.strip() if carrier_name else ''
+
+        po.status = 'IN_TRANSIT'
+        po.save()
+
+        return Response(PurchaseOrderSerializer(po).data)
+
     @action(detail=True, methods=['get'])
     def pdf(self, request, pk=None):
         from django.http import FileResponse
@@ -600,6 +660,9 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             filename=f"{po.po_no}.pdf",
             content_type='application/pdf',
         )
+
+    
+    
 
         
 
