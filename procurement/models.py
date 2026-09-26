@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from core.models import User
-from sales.models import ClientPO
+from sales.models import ClientPO, Enquiry
 
 
 class InventoryItem(models.Model):
@@ -107,6 +107,14 @@ class StockRequisitionItem(models.Model):
 
 
 class Supplier(models.Model):
+    SUPPLIER_TYPE_CHOICES = (
+        ('MANUFACTURER', 'Manufacturer'),
+        ('DISTRIBUTOR', 'Distributor'),
+        ('FREIGHT_FORWARDER', 'Freight Forwarder'),
+        ('SERVICE_PROVIDER', 'Service Provider'),
+        ('OTHER', 'Other'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200, unique=True)
     contact_person = models.CharField(max_length=200, blank=True)
@@ -115,8 +123,23 @@ class Supplier(models.Model):
     address = models.TextField(blank=True)
     country = models.CharField(max_length=100, default='Ghana')
     tax_id = models.CharField(max_length=50, blank=True)
+
+    supplier_type = models.CharField(
+        max_length=30,
+        choices=SUPPLIER_TYPE_CHOICES,
+        default='DISTRIBUTOR',
+    )
     is_international = models.BooleanField(default=False)
+    is_ksb_partner = models.BooleanField(
+        default=False,
+        help_text='Direct KSB manufacturer or authorized KSB distributor',
+    )
+    is_freight_forwarder = models.BooleanField(
+        default=False,
+        help_text='Handles shipping/freight for international orders',
+    )
     is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -133,13 +156,45 @@ class SupplierRFQ(models.Model):
         ('RECEIVED', 'Quotes Received'),
         ('CLOSED', 'Closed'),
     )
+
+    SOURCING_TYPE = (
+        ('LOCAL', 'Local Supplier'),
+        ('INTERNATIONAL', 'International Supplier'),
+        ('KSB', 'KSB Direct'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rfq_no = models.CharField(max_length=30, unique=True, editable=False)
-    client_po = models.ForeignKey(ClientPO, on_delete=models.CASCADE, related_name='supplier_rfqs')
+
+    # Link to either an Enquiry (pre-client PO) or a Client PO (post-win)
+    enquiry = models.ForeignKey(
+        Enquiry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='supplier_rfqs',
+        help_text='Linked enquiry (for pre-PO sourcing)',
+    )
+    client_po = models.ForeignKey(
+        ClientPO,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='supplier_rfqs',
+        help_text='Client PO (required when fulfilling a won project)',
+    )
+
+    sourcing_type = models.CharField(
+        max_length=20,
+        choices=SOURCING_TYPE,
+        default='LOCAL',
+    )
     item_description = models.TextField()
     quantity = models.DecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS, default='DRAFT')
     sent_date = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -172,20 +227,86 @@ class PurchaseOrder(models.Model):
         ('PENDING_FINANCE', 'Pending Finance Approval'),
         ('APPROVED', 'Approved'),
         ('SENT', 'Sent to Supplier'),
+        ('CONFIRMED', 'Order Confirmed by Supplier'),
+        ('IN_TRANSIT', 'In Transit / Shipping'),
         ('RECEIVED', 'Goods Received'),
         ('CANCELLED', 'Cancelled'),
     )
+
+    SOURCING_TYPE = (
+        ('LOCAL', 'Local Supplier'),
+        ('INTERNATIONAL', 'International Supplier'),
+        ('KSB', 'KSB Direct'),
+    )
+
+    CARRIER = (
+        ('DHL', 'DHL'),
+        ('FEDEX', 'FedEx'),
+        ('UPS', 'UPS'),
+        ('FREIGHT_FORWARDER', 'Freight Forwarder'),
+        ('LOCAL_COURIER', 'Local Courier'),
+        ('SUPPLIER', 'Supplier Ships Directly'),
+        ('OTHER', 'Other'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     po_no = models.CharField(max_length=30, unique=True, editable=False)
     rfq = models.ForeignKey(SupplierRFQ, on_delete=models.SET_NULL, null=True, blank=True)
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT)
-    client_po = models.ForeignKey(ClientPO, on_delete=models.CASCADE, related_name='purchase_orders')
+    client_po = models.ForeignKey(
+        ClientPO,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='purchase_orders',
+    )
+
+    sourcing_type = models.CharField(
+        max_length=20,
+        choices=SOURCING_TYPE,
+        default='LOCAL',
+    )
+
     total_cost = models.DecimalField(max_digits=14, decimal_places=2)
+    freight_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        help_text='Shipping/freight charges (separate from goods)',
+    )
     currency = models.CharField(max_length=5, default='GHS')
     status = models.CharField(max_length=30, choices=STATUS, default='PENDING_PROFITABILITY')
     expected_delivery = models.DateField(null=True, blank=True)
-    issued_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='pos_issued')
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='pos_approved')
+
+    # Order confirmation from supplier
+    order_confirmation_ref = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text='Supplier reference from their order confirmation',
+    )
+    order_confirmation_date = models.DateField(null=True, blank=True)
+    order_confirmation_file = models.FileField(
+        upload_to='po_confirmations/%Y/%m/',
+        null=True,
+        blank=True,
+    )
+
+    # Shipping / Logistics
+    carrier = models.CharField(max_length=30, choices=CARRIER, blank=True)
+    carrier_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text='Specific carrier or forwarder name if not DHL/FedEx/etc.',
+    )
+    tracking_number = models.CharField(max_length=100, blank=True)
+    shipping_notes = models.TextField(blank=True)
+
+    issued_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name='pos_issued'
+    )
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='pos_approved'
+    )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -196,7 +317,6 @@ class PurchaseOrder(models.Model):
 
     def __str__(self):
         return self.po_no
-
 
 class PurchaseOrderItem(models.Model):
     po = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name='items')
@@ -270,3 +390,105 @@ class WarehouseMovement(models.Model):
 
     def __str__(self):
         return f"{self.item.part_number} {self.movement_type} {self.quantity}"
+
+
+
+
+class EnquirySourcing(models.Model):
+    """
+    Supply Chain tracking of an enquiry from store-check through to
+    supplier sourcing and quotation.
+    """
+    STATUS = (
+        ('PENDING_CHECK', 'Pending Store Check'),
+        ('IN_STOCK', 'Available in Store'),
+        ('NEEDS_SOURCING', 'Needs Sourcing'),
+        ('SOURCING', 'Sourcing in Progress'),
+        ('OFFER_RECEIVED', 'Offer Received from Supplier'),
+        ('QUOTED', 'Quotation Prepared'),
+        ('SENT_TO_SALES', 'Sent to Sales'),
+        ('CLOSED', 'Closed'),
+    )
+
+    SOURCING_TYPE = (
+        ('LOCAL', 'Locally Sourced'),
+        ('INTERNATIONAL', 'International'),
+        ('KSB', 'KSB Direct'),
+        ('IN_STOCK', 'From Store Stock'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enquiry = models.OneToOneField(
+        Enquiry,
+        on_delete=models.CASCADE,
+        related_name='sourcing',
+    )
+
+    store_checked = models.BooleanField(default=False)
+    store_checked_at = models.DateTimeField(null=True, blank=True)
+    store_checked_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='store_checks',
+    )
+    store_available = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text='True=in stock, False=needs sourcing, Null=not checked yet',
+    )
+    available_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        help_text='Quantity available in store at check time',
+    )
+    store_notes = models.TextField(blank=True)
+
+    sourcing_type = models.CharField(
+        max_length=20,
+        choices=SOURCING_TYPE,
+        blank=True,
+    )
+    sourcing_decision_at = models.DateTimeField(null=True, blank=True)
+    sourcing_decision_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sourcing_decisions',
+    )
+    sourcing_notes = models.TextField(blank=True)
+
+    status = models.CharField(
+        max_length=30,
+        choices=STATUS,
+        default='PENDING_CHECK',
+    )
+    quotation_sent_to_sales = models.BooleanField(
+        default=False,
+        help_text='SC prepared quote and forwarded to Sales/EDM',
+    )
+    quotation_sent_at = models.DateTimeField(null=True, blank=True)
+
+    handled_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sourcing_handled',
+        help_text='SC officer assigned to this enquiry',
+    )
+    notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Enquiry Sourcing'
+        verbose_name_plural = 'Enquiry Sourcing'
+
+    def __str__(self):
+        return f"Sourcing for {self.enquiry.reference_no} ({self.get_status_display()})"

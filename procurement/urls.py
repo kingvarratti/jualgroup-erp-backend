@@ -4,6 +4,7 @@ from .views import (
     InventoryItemViewSet, StockRequisitionViewSet, SupplierViewSet,
     SupplierRFQViewSet, SupplierQuoteViewSet, PurchaseOrderViewSet,
     GoodsReceivedNoteViewSet, SupplierPaymentViewSet, WarehouseMovementViewSet,
+    EnquirySourcingViewSet,
 )
 
 router = DefaultRouter()
@@ -16,5 +17,6 @@ router.register('purchase-orders', PurchaseOrderViewSet)
 router.register('grns', GoodsReceivedNoteViewSet)
 router.register('supplier-payments', SupplierPaymentViewSet)
 router.register('warehouse-movements', WarehouseMovementViewSet)
+router.register('sourcing', EnquirySourcingViewSet)
 
 urlpatterns = [path('', include(router.urls))]

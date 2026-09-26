@@ -4,7 +4,7 @@ from .models import (
     Supplier, SupplierRFQ, SupplierQuote,
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
-    SupplierPayment, WarehouseMovement,
+    SupplierPayment, WarehouseMovement, EnquirySourcing,
 )
 
 
@@ -179,3 +179,38 @@ class WarehouseMovementSerializer(serializers.ModelSerializer):
         model = WarehouseMovement
         fields = '__all__'
         read_only_fields = ['performed_by', 'timestamp']
+
+
+
+class EnquirySourcingSerializer(serializers.ModelSerializer):
+    enquiry_ref = serializers.CharField(source='enquiry.reference_no', read_only=True)
+    client_name = serializers.CharField(source='enquiry.client_name', read_only=True)
+    enquiry_description = serializers.CharField(source='enquiry.description', read_only=True)
+    enquiry_estimated_value = serializers.DecimalField(
+        source='enquiry.estimated_value',
+        max_digits=14,
+        decimal_places=2,
+        read_only=True,
+    )
+    store_checked_by_name = serializers.CharField(
+        source='store_checked_by.get_full_name', read_only=True
+    )
+    sourcing_decision_by_name = serializers.CharField(
+        source='sourcing_decision_by.get_full_name', read_only=True
+    )
+    handled_by_name = serializers.CharField(
+        source='handled_by.get_full_name', read_only=True
+    )
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    sourcing_type_display = serializers.CharField(
+        source='get_sourcing_type_display', read_only=True
+    )
+
+    class Meta:
+        model = EnquirySourcing
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'store_checked_at', 'store_checked_by',
+            'sourcing_decision_at', 'sourcing_decision_by',
+            'quotation_sent_at', 'created_at', 'updated_at',
+        ]

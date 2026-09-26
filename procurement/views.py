@@ -9,22 +9,22 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from datetime import timedelta
 from django_filters.rest_framework import DjangoFilterBackend
-
 from .models import (
     InventoryItem, StockRequisition, StockRequisitionItem,
     Supplier, SupplierRFQ, SupplierQuote,
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
-    SupplierPayment, WarehouseMovement,
+    SupplierPayment, WarehouseMovement, EnquirySourcing,
 )
 from .serializers import (
     InventoryItemSerializer, StockRequisitionSerializer, StockRequisitionItemSerializer,
     SupplierSerializer, SupplierRFQSerializer, SupplierQuoteSerializer,
     PurchaseOrderSerializer, PurchaseOrderCreateSerializer, PurchaseOrderItemSerializer,
     GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
-    WarehouseMovementSerializer,
+    WarehouseMovementSerializer, EnquirySourcingSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
+from sales.models import Enquiry
 from core.permissions import IsStores, IsSupplyChain, IsFinance
 
 
@@ -541,3 +541,114 @@ class WarehouseMovementViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['movement_type', 'item']
+
+
+
+class EnquirySourcingViewSet(viewsets.ModelViewSet):
+    queryset = EnquirySourcing.objects.all().select_related(
+        'enquiry', 'store_checked_by', 'sourcing_decision_by', 'handled_by'
+    )
+    serializer_class = EnquirySourcingSerializer
+    permission_classes = [IsAuthenticated, IsSupplyChain]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'sourcing_type']
+
+    def list(self, request, *args, **kwargs):
+        # Auto-create a sourcing record for any enquiry missing one
+        existing_ids = EnquirySourcing.objects.values_list('enquiry_id', flat=True)
+        missing = Enquiry.objects.exclude(id__in=existing_ids)
+        for enquiry in missing:
+            EnquirySourcing.objects.create(enquiry=enquiry)
+        return super().list(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def store_check(self, request, pk=None):
+        """Record store availability check result."""
+        from django.utils import timezone
+
+        sourcing = self.get_object()
+        available = request.data.get('store_available')
+        qty = request.data.get('available_qty', 0)
+        notes = (request.data.get('store_notes') or '').strip()
+
+        sourcing.store_checked = True
+        sourcing.store_checked_at = timezone.now()
+        sourcing.store_checked_by = request.user
+        sourcing.store_available = (
+            available if isinstance(available, bool) else str(available).lower() == 'true'
+        )
+        sourcing.available_qty = qty
+        sourcing.store_notes = notes
+
+        if sourcing.store_available:
+            sourcing.status = 'IN_STOCK'
+            sourcing.sourcing_type = 'IN_STOCK'
+        else:
+            sourcing.status = 'NEEDS_SOURCING'
+
+        sourcing.save()
+        return Response(EnquirySourcingSerializer(sourcing).data)
+
+    @action(detail=True, methods=['post'])
+    def sourcing_decision(self, request, pk=None):
+        """Record sourcing decision (LOCAL / INTERNATIONAL / KSB)."""
+        from django.utils import timezone
+
+        sourcing = self.get_object()
+        decision = (request.data.get('sourcing_type') or '').strip().upper()
+        notes = (request.data.get('sourcing_notes') or '').strip()
+
+        valid = ['LOCAL', 'INTERNATIONAL', 'KSB']
+        if decision not in valid:
+            return Response(
+                {'error': f'Invalid sourcing type. Must be one of: {", ".join(valid)}'},
+                status=400,
+            )
+
+        sourcing.sourcing_type = decision
+        sourcing.sourcing_decision_at = timezone.now()
+        sourcing.sourcing_decision_by = request.user
+        sourcing.sourcing_notes = notes
+        sourcing.status = 'SOURCING'
+        sourcing.save()
+        return Response(EnquirySourcingSerializer(sourcing).data)
+
+    @action(detail=True, methods=['post'])
+    def send_to_sales(self, request, pk=None):
+        """Mark as forwarded to Sales with a quote."""
+        from django.utils import timezone
+
+        sourcing = self.get_object()
+        notes = (request.data.get('notes') or '').strip()
+
+        sourcing.quotation_sent_to_sales = True
+        sourcing.quotation_sent_at = timezone.now()
+        sourcing.status = 'SENT_TO_SALES'
+        if notes:
+            sourcing.notes = (sourcing.notes + '\n' + notes).strip()
+
+        sourcing.save()
+        return Response(EnquirySourcingSerializer(sourcing).data)
+
+    @action(detail=True, methods=['post'])
+    def assign_to_me(self, request, pk=None):
+        """Assign this sourcing task to the current user."""
+        sourcing = self.get_object()
+        sourcing.handled_by = request.user
+        sourcing.save()
+        return Response(EnquirySourcingSerializer(sourcing).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """Dashboard counts."""
+        qs = EnquirySourcing.objects.all()
+        return Response({
+            'pending_check': qs.filter(status='PENDING_CHECK').count(),
+            'in_stock': qs.filter(status='IN_STOCK').count(),
+            'needs_sourcing': qs.filter(status='NEEDS_SOURCING').count(),
+            'sourcing': qs.filter(status='SOURCING').count(),
+            'offer_received': qs.filter(status='OFFER_RECEIVED').count(),
+            'quoted': qs.filter(status='QUOTED').count(),
+            'sent_to_sales': qs.filter(status='SENT_TO_SALES').count(),
+            'total_active': qs.exclude(status__in=['CLOSED', 'SENT_TO_SALES']).count(),
+        })
