@@ -421,14 +421,122 @@ class SupplierViewSet(viewsets.ModelViewSet):
 
 
 class SupplierRFQViewSet(viewsets.ModelViewSet):
-    queryset = SupplierRFQ.objects.all()
+    queryset = SupplierRFQ.objects.all().select_related('enquiry', 'client_po', 'created_by')
     serializer_class = SupplierRFQSerializer
     permission_classes = [IsAuthenticated, IsSupplyChain]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['status', 'client_po']
+    filterset_fields = ['status', 'client_po', 'enquiry']
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['get'])
+    def quotes(self, request, pk=None):
+        """Return all quotes for this RFQ with rankings."""
+        rfq = self.get_object()
+        quotes = rfq.quotes.all().select_related('supplier').order_by('total_price')
+
+        if not quotes.exists():
+            return Response({
+                'rfq': SupplierRFQSerializer(rfq).data,
+                'quotes': [],
+                'cheapest_id': None,
+                'fastest_id': None,
+            })
+
+        # Find cheapest and fastest
+        cheapest = quotes.first()  # sorted by total_price
+        fastest = min(quotes, key=lambda q: q.lead_time_days or 999999)
+
+        # Compute unit price stats for scoring
+        prices = [float(q.total_price) for q in quotes]
+        min_price = min(prices)
+        max_price = max(prices)
+
+        leads = [q.lead_time_days or 0 for q in quotes]
+        min_lead = min(leads)
+        max_lead = max(leads)
+
+        # Build enriched response
+        result = []
+        for q in quotes:
+            price = float(q.total_price)
+            lead = q.lead_time_days or 0
+
+            # Simple score: lower is better (price weight 70%, lead time weight 30%)
+            price_score = (
+                ((price - min_price) / (max_price - min_price) * 100)
+                if max_price > min_price else 0
+            )
+            lead_score = (
+                ((lead - min_lead) / (max_lead - min_lead) * 100)
+                if max_lead > min_lead else 0
+            )
+            score = 0.7 * price_score + 0.3 * lead_score
+
+            result.append({
+                'id': q.id,
+                'supplier_id': q.supplier.id,
+                'supplier_name': q.supplier.name,
+                'supplier_is_ksb': q.supplier.is_ksb_partner,
+                'supplier_is_international': q.supplier.is_international,
+                'unit_price': float(q.unit_price),
+                'total_price': float(q.total_price),
+                'lead_time_days': lead,
+                'is_selected': q.is_selected,
+                'has_file': bool(q.quote_file),
+                'quote_file': q.quote_file.url if q.quote_file else None,
+                'received_at': q.received_at,
+                'is_cheapest': q.id == cheapest.id,
+                'is_fastest': q.id == fastest.id,
+                'price_delta': float(price - min_price),
+                'lead_delta': lead - min_lead,
+                'score': round(score, 2),
+            })
+
+        # Sort by score for the "Best Overall" recommendation
+        result.sort(key=lambda x: x['score'])
+
+        return Response({
+            'rfq': SupplierRFQSerializer(rfq).data,
+            'quotes': result,
+            'cheapest_id': cheapest.id,
+            'fastest_id': fastest.id,
+            'best_overall_id': result[0]['id'] if result else None,
+        })
+
+    @action(detail=True, methods=['post'])
+    def select_quote(self, request, pk=None):
+        """Mark one quote as selected (unmarks all others for this RFQ)."""
+        rfq = self.get_object()
+        quote_id = request.data.get('quote_id')
+
+        if not quote_id:
+            return Response({'error': 'quote_id is required'}, status=400)
+
+        try:
+            quote = rfq.quotes.get(id=quote_id)
+        except SupplierQuote.DoesNotExist:
+            return Response({'error': 'Quote not found for this RFQ'}, status=404)
+
+        # Unmark all quotes for this RFQ
+        rfq.quotes.update(is_selected=False)
+
+        # Mark the chosen one
+        quote.is_selected = True
+        quote.save()
+
+        # Close the RFQ
+        rfq.status = 'CLOSED'
+        rfq.save()
+
+        return Response({
+            'success': True,
+            'selected_quote_id': quote.id,
+            'supplier_name': quote.supplier.name,
+            'total_price': float(quote.total_price),
+            'message': f'Quote from {quote.supplier.name} selected',
+        })
 
 
 class SupplierQuoteViewSet(viewsets.ModelViewSet):
