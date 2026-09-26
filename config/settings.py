@@ -1,4 +1,10 @@
 from pathlib import Path
+# --- Compatibility patch for Django 6.1 + django-filter ---
+from django.http import HttpRequest
+
+if not hasattr(HttpRequest, 'query_params'):
+    HttpRequest.query_params = property(lambda self: self.GET)
+# ---------------------------------------------------------
 from datetime import timedelta
 import os
 

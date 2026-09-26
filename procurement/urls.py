@@ -4,13 +4,14 @@ from .views import (
     InventoryItemViewSet, BranchStockViewSet, StockRequisitionViewSet,
     SupplierViewSet, SupplierRFQViewSet, SupplierQuoteViewSet, PurchaseOrderViewSet,
     GoodsReceivedNoteViewSet, SupplierPaymentViewSet, WarehouseMovementViewSet,
-    EnquirySourcingViewSet,
+    EnquirySourcingViewSet, RequisitionRequestViewSet,
 )
 
 router = DefaultRouter()
 router.register('inventory', InventoryItemViewSet)
 router.register('branch-stocks', BranchStockViewSet)
 router.register('stock-requisitions', StockRequisitionViewSet)
+router.register('requisitions', RequisitionRequestViewSet, basename='requisition')
 router.register('suppliers', SupplierViewSet)
 router.register('rfqs', SupplierRFQViewSet)
 router.register('supplier-quotes', SupplierQuoteViewSet)

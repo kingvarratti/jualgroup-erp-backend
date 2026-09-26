@@ -15,6 +15,7 @@ from .models import (
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
+    RequisitionRequest, RequisitionItem,
 )
 from .serializers import (
     InventoryItemSerializer, BranchStockSerializer, StockRequisitionSerializer,
@@ -23,6 +24,8 @@ from .serializers import (
     PurchaseOrderSerializer, PurchaseOrderCreateSerializer, PurchaseOrderItemSerializer,
     GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
     WarehouseMovementSerializer, EnquirySourcingSerializer,
+    RequisitionRequestSerializer, RequisitionRequestCreateSerializer,
+    RequisitionItemSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
 from sales.models import Enquiry
@@ -318,9 +321,9 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             'updated_items': updated[:50],
         })
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], url_path='dispatch')
     @transaction.atomic
-    def adjust_stock(self, request, pk=None):
+    def mark_dispatched(self, request, pk=None):
         """Adjust stock quantity with a reason and audit trail."""
         from decimal import Decimal
 
@@ -897,3 +900,194 @@ class BranchStockViewSet(viewsets.ModelViewSet):
         )
 
         return Response(BranchStockSerializer(bs).data)
+
+
+
+class RequisitionRequestViewSet(viewsets.ModelViewSet):
+    queryset = RequisitionRequest.objects.all().select_related(
+        'requested_by', 'approved_by', 'requesting_branch', 'target_branch', 'client_po'
+    ).prefetch_related('items')
+    serializer_class = RequisitionRequestSerializer
+    permission_classes = [IsAuthenticated]
+   
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return RequisitionRequestCreateSerializer
+        return RequisitionRequestSerializer
+
+    def get_permissions(self):
+        if self.action in ['approve', 'reject', 'start_picking', 'pick_item',
+                           'mark_packed', 'dispatch', 'receive']:
+            return [IsAuthenticated(), IsStores()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        req = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='REQUISITION',
+            reference_id=req.req_no,
+        )
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Only REQUESTED requisitions can be approved'}, status=400)
+
+        for item in req.items.all():
+            if item.quantity_approved == 0:
+                item.quantity_approved = item.quantity_requested
+                item.save()
+
+        req.status = 'APPROVED'
+        req.approved_by = request.user
+        req.approved_at = timezone.now()
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Can only reject REQUESTED requisitions'}, status=400)
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason is required'}, status=400)
+
+        req.status = 'REJECTED'
+        req.rejected_by = request.user
+        req.rejected_at = timezone.now()
+        req.rejection_reason = reason
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def start_picking(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'APPROVED':
+            return Response({'error': 'Must be APPROVED first'}, status=400)
+        req.status = 'PICKING'
+        req.picked_by = request.user
+        req.picked_at = timezone.now()
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def pick_item(self, request, pk=None):
+        req = self.get_object()
+        item_id = request.data.get('item_id')
+        qty = request.data.get('quantity_issued')
+
+        try:
+            item = req.items.get(id=item_id)
+        except RequisitionItem.DoesNotExist:
+            return Response({'error': 'Item not found'}, status=404)
+
+        item.picked = True
+        item.quantity_issued = qty if qty is not None else item.quantity_approved
+        item.save()
+        return Response(RequisitionItemSerializer(item).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_packed(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status not in ['PICKING', 'APPROVED']:
+            return Response({'error': 'Must be in PICKING or APPROVED'}, status=400)
+
+        req.items.update(packed=True)
+        req.status = 'PACKED'
+        req.packed_by = request.user
+        req.packed_at = timezone.now()
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='dispatch')
+    @transaction.atomic
+    def mark_dispatch(self, request, pk=None):
+        from django.utils import timezone
+        from decimal import Decimal
+        req = self.get_object()
+
+        if req.status != 'PACKED':
+            return Response({'error': 'Must be PACKED first'}, status=400)
+
+        for req_item in req.items.all():
+            if not req_item.item:
+                continue
+            branch = req.requesting_branch
+            if branch:
+                try:
+                    bs = BranchStock.objects.get(item=req_item.item, branch=branch)
+                    bs.quantity_on_hand -= Decimal(str(req_item.quantity_issued))
+                    if bs.quantity_on_hand < 0:
+                        bs.quantity_on_hand = Decimal('0')
+                    bs.save()
+                except BranchStock.DoesNotExist:
+                    pass
+
+            req_item.item.quantity_on_hand -= Decimal(str(req_item.quantity_issued))
+            if req_item.item.quantity_on_hand < 0:
+                req_item.item.quantity_on_hand = Decimal('0')
+            req_item.item.save()
+
+            WarehouseMovement.objects.create(
+                item=req_item.item,
+                movement_type='OUT',
+                quantity=req_item.quantity_issued,
+                reference=req.req_no,
+                reason=f"{req.get_requisition_type_display()} dispatch",
+                performed_by=request.user,
+            )
+
+        req.status = 'DISPATCHED'
+        req.dispatched_by = request.user
+        req.dispatched_at = timezone.now()
+        req.carrier = request.data.get('carrier', '')
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def receive(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'DISPATCHED':
+            return Response({'error': 'Must be DISPATCHED first'}, status=400)
+        req.status = 'COMPLETED'
+        req.received_by = request.user
+        req.received_at = timezone.now()
+        req.save()
+        return Response(RequisitionRequestSerializer(req).data)
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_requisition_pdf
+        req = self.get_object()
+        buffer = generate_requisition_pdf(req)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{req.req_no}.pdf",
+            content_type='application/pdf',
+        )
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = RequisitionRequest.objects.all()
+        return Response({
+            'requested': qs.filter(status='REQUESTED').count(),
+            'approved': qs.filter(status='APPROVED').count(),
+            'picking': qs.filter(status='PICKING').count(),
+            'packed': qs.filter(status='PACKED').count(),
+            'dispatched': qs.filter(status='DISPATCHED').count(),
+            'completed': qs.filter(status='COMPLETED').count(),
+            'rejected': qs.filter(status='REJECTED').count(),
+            'internal': qs.filter(requisition_type='INTERNAL').count(),
+            'external': qs.filter(requisition_type='EXTERNAL').count(),
+        })

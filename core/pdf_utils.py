@@ -734,3 +734,95 @@ def generate_soa_pdf(soa):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
+
+
+
+def generate_requisition_pdf(requisition):
+    buffer = io.BytesIO()
+    doc = _build_doc(buffer, f"Requisition {requisition.req_no}")
+    story = []
+
+    _company_header(story)
+    _doc_title(
+        story,
+        f"REQUISITION — {requisition.get_requisition_type_display().upper()}",
+        f"Ref: {requisition.req_no}  |  Status: {requisition.get_status_display()}",
+    )
+
+    info_rows = [
+        ("Type", requisition.get_requisition_type_display()),
+    ]
+    if requisition.source_department:
+        info_rows.append(("Department", requisition.get_source_department_display()))
+    if requisition.client_po:
+        info_rows.append(("Client PO", requisition.client_po.internal_order_no))
+    if requisition.requesting_branch:
+        info_rows.append(("From Branch", requisition.requesting_branch.name))
+    if requisition.target_branch:
+        info_rows.append(("To Branch", requisition.target_branch.name))
+    if requisition.requested_by:
+        info_rows.append(("Requested By", requisition.requested_by.get_full_name() or requisition.requested_by.username))
+    info_rows.append(("Requested On", str(requisition.created_at.date())))
+    if requisition.waybill_no:
+        info_rows.append(("Waybill No.", requisition.waybill_no))
+    if requisition.carrier:
+        info_rows.append(("Carrier", requisition.carrier))
+
+    story.append(_info_table(info_rows))
+    story.append(Spacer(1, 8 * mm))
+
+    # Line items
+    line_data = [["#", "Description", "UoM", "Requested", "Approved", "Issued"]]
+    for idx, item in enumerate(requisition.items.all(), start=1):
+        line_data.append([
+            str(idx),
+            item.description,
+            item.uom,
+            str(item.quantity_requested),
+            str(item.quantity_approved),
+            str(item.quantity_issued),
+        ])
+
+    line_table = Table(line_data, colWidths=[10 * mm, 70 * mm, 15 * mm, 25 * mm, 25 * mm, 25 * mm])
+    line_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(line_table)
+
+    if requisition.notes:
+        story.append(Spacer(1, 10 * mm))
+        styles = getSampleStyleSheet()
+        note_style = ParagraphStyle(
+            'Note', parent=styles['Normal'],
+            fontSize=9, textColor=colors.HexColor('#1e293b'),
+        )
+        story.append(Paragraph("<b>Notes</b>", note_style))
+        story.append(Paragraph(requisition.notes, note_style))
+
+    # Signature block
+    story.append(Spacer(1, 15 * mm))
+    sig_data = [
+        ["_______________________", "_______________________"],
+        ["Prepared By", "Received By"],
+    ]
+    sig_table = Table(sig_data, colWidths=[80 * mm, 80 * mm])
+    sig_table.setStyle(TableStyle([
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(sig_table)
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer

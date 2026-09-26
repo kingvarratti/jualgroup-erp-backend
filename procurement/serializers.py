@@ -5,6 +5,7 @@ from .models import (
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
+    RequisitionRequest, RequisitionItem,
 )
 
 
@@ -239,3 +240,78 @@ class EnquirySourcingSerializer(serializers.ModelSerializer):
             'sourcing_decision_at', 'sourcing_decision_by',
             'quotation_sent_at', 'created_at', 'updated_at',
         ]
+
+
+
+
+class RequisitionItemSerializer(serializers.ModelSerializer):
+    item_detail = InventoryItemSerializer(source='item', read_only=True)
+
+    class Meta:
+        model = RequisitionItem
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class RequisitionRequestSerializer(serializers.ModelSerializer):
+    items = RequisitionItemSerializer(many=True, read_only=True)
+    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
+    requesting_branch_name = serializers.CharField(source='requesting_branch.name', read_only=True)
+    target_branch_name = serializers.CharField(source='target_branch.name', read_only=True)
+    client_po_no = serializers.CharField(source='client_po.internal_order_no', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
+    department_display = serializers.CharField(source='get_source_department_display', read_only=True)
+    item_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RequisitionRequest
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'req_no', 'status', 'requested_by',
+            'approved_by', 'approved_at', 'rejected_by', 'rejected_at',
+            'picked_by', 'picked_at', 'packed_by', 'packed_at',
+            'dispatched_by', 'dispatched_at', 'received_by', 'received_at',
+            'waybill_no', 'created_at', 'updated_at',
+        ]
+
+    def get_item_count(self, obj):
+        return obj.items.count()
+
+
+class RequisitionRequestCreateSerializer(serializers.ModelSerializer):
+    items = serializers.JSONField(write_only=True, required=False)
+
+    class Meta:
+        model = RequisitionRequest
+        fields = [
+            'id', 'requisition_type', 'source_department',
+            'client_po', 'requesting_branch', 'target_branch',
+            'purpose', 'notes', 'items',
+        ]
+
+    def create(self, validated_data):
+        import json
+        items_data = validated_data.pop('items', [])
+        if isinstance(items_data, str):
+            try:
+                items_data = json.loads(items_data)
+            except Exception:
+                items_data = []
+
+        user = self.context['request'].user
+        req = RequisitionRequest.objects.create(requested_by=user, **validated_data)
+
+        for i in (items_data or []):
+            RequisitionItem.objects.create(
+                requisition=req,
+                item_id=i.get('item') or None,
+                description=i.get('description', ''),
+                uom=i.get('uom', 'pcs'),
+                quantity_requested=i.get('quantity_requested', 0),
+            )
+        return req
+
+

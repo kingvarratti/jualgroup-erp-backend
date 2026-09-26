@@ -121,52 +121,7 @@ class BranchStock(models.Model):
 
 
 
-class BranchStock(models.Model):
-    """
-    Physical stock of an InventoryItem at a specific Branch.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    item = models.ForeignKey(
-        InventoryItem,
-        on_delete=models.CASCADE,
-        related_name='branch_stocks',
-    )
-    branch = models.ForeignKey(
-        Branch,
-        on_delete=models.CASCADE,
-        related_name='stocks',
-    )
-    quantity_on_hand = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    reorder_level = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    safety_stock = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    location = models.CharField(max_length=100, blank=True, help_text='Shelf/Rack')
-    bin_number = models.CharField(max_length=50, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        unique_together = ('item', 'branch')
-        ordering = ['item__part_number', 'branch__name']
-        verbose_name = 'Branch Stock'
-        verbose_name_plural = 'Branch Stocks'
-
-    @property
-    def needs_reorder(self):
-        return self.quantity_on_hand <= self.reorder_level
-
-    @property
-    def is_out_of_stock(self):
-        return self.quantity_on_hand <= 0
-
-    @property
-    def stock_status(self):
-        if self.quantity_on_hand <= 0:
-            return 'OUT_OF_STOCK'
-        if self.quantity_on_hand <= self.reorder_level:
-            return 'LOW_STOCK'
-        return 'IN_STOCK'
-
-    def __str__(self):
-        return f"{self.item.part_number} @ {self.branch.name}: {self.quantity_on_hand}"
 
 class StockRequisition(models.Model):
     STATUS = (
@@ -591,3 +546,150 @@ class EnquirySourcing(models.Model):
 
     def __str__(self):
         return f"Sourcing for {self.enquiry.reference_no} ({self.get_status_display()})"
+
+
+
+
+class RequisitionRequest(models.Model):
+    """
+    Unified requisition for both internal (department) and external (client) requests.
+    """
+    REQ_TYPE = (
+        ('INTERNAL', 'Internal (Department)'),
+        ('EXTERNAL', 'External (Client Order)'),
+    )
+
+    SOURCE_DEPT = (
+        ('AUTOMATION', 'Automation'),
+        ('SERVICE', 'Service'),
+        ('PRODUCTION', 'Production'),
+        ('PROJECT', 'Project'),
+        ('PROCUREMENT', 'Procurement'),
+        ('OTHER', 'Other'),
+    )
+
+    STATUS = (
+        ('REQUESTED', 'Requested'),
+        ('APPROVED', 'Approved'),
+        ('PICKING', 'Picking in Progress'),
+        ('PACKED', 'Packed'),
+        ('DISPATCHED', 'Dispatched'),
+        ('COMPLETED', 'Completed'),
+        ('REJECTED', 'Rejected'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    req_no = models.CharField(max_length=30, unique=True, editable=False)
+    requisition_type = models.CharField(max_length=20, choices=REQ_TYPE)
+    source_department = models.CharField(
+        max_length=30, choices=SOURCE_DEPT, blank=True,
+        help_text='Required for INTERNAL requisitions',
+    )
+
+    # Links
+    client_po = models.ForeignKey(
+        ClientPO, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisition_requests',
+        help_text='Required for EXTERNAL requisitions',
+    )
+    requesting_branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_from',
+        help_text='Branch stocking out the items',
+    )
+    target_branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_to',
+        help_text='Target branch (if cross-branch)',
+    )
+
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='requisitions_requested',
+    )
+    purpose = models.CharField(max_length=200, blank=True)
+    notes = models.TextField(blank=True)
+
+    # Status
+    status = models.CharField(max_length=20, choices=STATUS, default='REQUESTED')
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_rejected',
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+
+    # Pick & Pack
+    picked_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_picked',
+    )
+    picked_at = models.DateTimeField(null=True, blank=True)
+    packed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_packed',
+    )
+    packed_at = models.DateTimeField(null=True, blank=True)
+
+    # Dispatch
+    dispatched_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_dispatched',
+    )
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    received_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='requisitions_received',
+    )
+    received_at = models.DateTimeField(null=True, blank=True)
+
+    # Waybill
+    waybill_no = models.CharField(max_length=30, blank=True)
+    carrier = models.CharField(max_length=100, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Requisition Request'
+        verbose_name_plural = 'Requisition Requests'
+
+    def save(self, *args, **kwargs):
+        if not self.req_no:
+            prefix = 'IR' if self.requisition_type == 'INTERNAL' else 'ER'
+            self.req_no = f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
+        if self.status == 'DISPATCHED' and not self.waybill_no:
+            self.waybill_no = f"WB-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.req_no} ({self.get_status_display()})"
+
+
+class RequisitionItem(models.Model):
+    """Line item for a RequisitionRequest."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    requisition = models.ForeignKey(
+        RequisitionRequest, on_delete=models.CASCADE, related_name='items',
+    )
+    item = models.ForeignKey(
+        InventoryItem, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    description = models.CharField(max_length=300)
+    uom = models.CharField(max_length=20, default='pcs')
+    quantity_requested = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    quantity_approved = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    quantity_issued = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    picked = models.BooleanField(default=False)
+    packed = models.BooleanField(default=False)
+    remarks = models.CharField(max_length=200, blank=True)
+
+    def __str__(self):
+        return f"{self.description} x {self.quantity_requested}"
