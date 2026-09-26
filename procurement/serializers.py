@@ -48,12 +48,21 @@ class SupplierSerializer(serializers.ModelSerializer):
 
 
 class SupplierRFQSerializer(serializers.ModelSerializer):
+    enquiry_ref = serializers.CharField(source='enquiry.reference_no', read_only=True)
+    client_po_no = serializers.CharField(source='client_po.internal_order_no', read_only=True)
+    client_name = serializers.CharField(source='enquiry.client_name', read_only=True)
+    sourcing_type_display = serializers.CharField(source='get_sourcing_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    quote_count = serializers.SerializerMethodField()
+
     class Meta:
         model = SupplierRFQ
         fields = '__all__'
         read_only_fields = ['id', 'rfq_no', 'created_by', 'created_at']
 
-
+    def get_quote_count(self, obj):
+        return obj.quotes.count()
 class SupplierQuoteSerializer(serializers.ModelSerializer):
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
 
