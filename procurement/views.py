@@ -16,7 +16,9 @@ from .models import (
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
+    StockTransferRequest, StockTransferItem,InternalMovement,
 )
+
 from .serializers import (
     InventoryItemSerializer, BranchStockSerializer, StockRequisitionSerializer,
     StockRequisitionItemSerializer,
@@ -25,7 +27,8 @@ from .serializers import (
     GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
     WarehouseMovementSerializer, EnquirySourcingSerializer,
     RequisitionRequestSerializer, RequisitionRequestCreateSerializer,
-    RequisitionItemSerializer,
+    RequisitionItemSerializer,    StockTransferRequestSerializer, StockTransferRequestCreateSerializer,
+    StockTransferItemSerializer, InternalMovementSerializer,
 )
 from core.models import ApprovalRequest, AuditLog, Role
 from sales.models import Enquiry
@@ -1090,4 +1093,314 @@ class RequisitionRequestViewSet(viewsets.ModelViewSet):
             'rejected': qs.filter(status='REJECTED').count(),
             'internal': qs.filter(requisition_type='INTERNAL').count(),
             'external': qs.filter(requisition_type='EXTERNAL').count(),
+        })
+
+
+
+class StockTransferRequestViewSet(viewsets.ModelViewSet):
+    queryset = StockTransferRequest.objects.all().select_related(
+        'from_branch', 'to_branch', 'requested_by', 'approved_by',
+    ).prefetch_related('items')
+    serializer_class = StockTransferRequestSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'from_branch', 'to_branch', 'transfer_type']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return StockTransferRequestCreateSerializer
+        return StockTransferRequestSerializer
+
+    def get_permissions(self):
+        if self.action in ['approve', 'reject', 'mark_dispatched', 'mark_received']:
+            return [IsAuthenticated(), IsStores()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        req = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='STOCK_TRANSFER',
+            reference_id=req.transfer_no,
+        )
+
+    @action(detail=True, methods=['get'])
+    def availability(self, request, pk=None):
+        """Check source branch availability for all items."""
+        req = self.get_object()
+        result = []
+        for item in req.items.all():
+            available = 0
+            if item.item:
+                try:
+                    bs = BranchStock.objects.get(item=item.item, branch=req.from_branch)
+                    available = float(bs.quantity_on_hand)
+                except BranchStock.DoesNotExist:
+                    available = 0
+            result.append({
+                'item_id': item.id,
+                'description': item.description,
+                'requested': float(item.quantity_requested),
+                'available': available,
+                'sufficient': available >= float(item.quantity_requested),
+            })
+        return Response(result)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Only REQUESTED transfers can be approved'}, status=400)
+
+        # Check availability
+        for req_item in req.items.all():
+            if req_item.item:
+                try:
+                    bs = BranchStock.objects.get(item=req_item.item, branch=req.from_branch)
+                    if bs.quantity_on_hand < req_item.quantity_requested:
+                        return Response({
+                            'error': f'Insufficient stock for {req_item.item.part_number} at {req.from_branch.name}. '
+                                     f'Available: {bs.quantity_on_hand}, Requested: {req_item.quantity_requested}'
+                        }, status=400)
+                except BranchStock.DoesNotExist:
+                    return Response({
+                        'error': f'{req_item.item.part_number} not stocked at {req.from_branch.name}'
+                    }, status=400)
+
+        for item in req.items.all():
+            if item.quantity_approved == 0:
+                item.quantity_approved = item.quantity_requested
+                item.save()
+
+        req.status = 'APPROVED'
+        req.approved_by = request.user
+        req.approved_at = timezone.now()
+        req.save()
+        return Response(StockTransferRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        from django.utils import timezone
+        req = self.get_object()
+        if req.status != 'REQUESTED':
+            return Response({'error': 'Only REQUESTED transfers can be rejected'}, status=400)
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason is required'}, status=400)
+
+        req.status = 'REJECTED'
+        req.rejected_by = request.user
+        req.rejected_at = timezone.now()
+        req.rejection_reason = reason
+        req.save()
+        return Response(StockTransferRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def mark_dispatched(self, request, pk=None):
+        from django.utils import timezone
+        from decimal import Decimal
+        req = self.get_object()
+
+        if req.status != 'APPROVED':
+            return Response({'error': 'Must be APPROVED first'}, status=400)
+
+        for req_item in req.items.all():
+            if not req_item.item:
+                continue
+            qty = Decimal(str(req_item.quantity_approved))
+            try:
+                bs = BranchStock.objects.get(item=req_item.item, branch=req.from_branch)
+                if bs.quantity_on_hand < qty:
+                    return Response({'error': f'Insufficient stock for {req_item.item.part_number}'}, status=400)
+                bs.quantity_on_hand -= qty
+                bs.save()
+                req_item.quantity_dispatched = qty
+                req_item.save()
+
+                WarehouseMovement.objects.create(
+                    item=req_item.item,
+                    movement_type='TRANSFER',
+                    quantity=qty,
+                    from_location=req.from_branch.name,
+                    to_location=req.to_branch.name,
+                    reference=req.transfer_no,
+                    reason='Inter-branch transfer dispatch',
+                    performed_by=request.user,
+                )
+            except BranchStock.DoesNotExist:
+                return Response({'error': f'{req_item.item.part_number} not in source branch'}, status=400)
+
+        req.status = 'DISPATCHED'
+        req.dispatched_by = request.user
+        req.dispatched_at = timezone.now()
+        req.save()
+        return Response(StockTransferRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def mark_received(self, request, pk=None):
+        from django.utils import timezone
+        from decimal import Decimal
+        req = self.get_object()
+
+        if req.status != 'DISPATCHED':
+            return Response({'error': 'Must be DISPATCHED first'}, status=400)
+
+        for req_item in req.items.all():
+            if not req_item.item:
+                continue
+            qty = Decimal(str(req_item.quantity_dispatched))
+            bs, _ = BranchStock.objects.get_or_create(
+                item=req_item.item,
+                branch=req.to_branch,
+                defaults={
+                    'quantity_on_hand': 0,
+                    'reorder_level': 0,
+                    'safety_stock': 0,
+                },
+            )
+            bs.quantity_on_hand += qty
+            bs.save()
+            req_item.quantity_received = qty
+            req_item.save()
+
+        req.status = 'RECEIVED'
+        req.received_by = request.user
+        req.received_at = timezone.now()
+        req.received_notes = request.data.get('notes', '')
+        req.save()
+        return Response(StockTransferRequestSerializer(req).data)
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_stock_transfer_pdf
+        req = self.get_object()
+        buffer = generate_stock_transfer_pdf(req)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{req.transfer_no}.pdf",
+            content_type='application/pdf',
+        )
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = StockTransferRequest.objects.all()
+        return Response({
+            'requested': qs.filter(status='REQUESTED').count(),
+            'approved': qs.filter(status='APPROVED').count(),
+            'dispatched': qs.filter(status='DISPATCHED').count(),
+            'received': qs.filter(status='RECEIVED').count(),
+            'rejected': qs.filter(status='REJECTED').count(),
+        })
+
+
+
+
+class InternalMovementViewSet(viewsets.ModelViewSet):
+    queryset = InternalMovement.objects.all().select_related(
+        'item', 'branch', 'requested_by', 'moved_by', 'verified_by',
+    )
+    serializer_class = InternalMovementSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'branch', 'reason', 'item']
+
+    def get_permissions(self):
+        if self.action in ['plan', 'mark_moved', 'verify']:
+            return [IsAuthenticated(), IsStores()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        mv = serializer.save(requested_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='INTERNAL_MOVEMENT',
+            reference_id=mv.movement_no,
+        )
+
+    @action(detail=True, methods=['post'])
+    def plan(self, request, pk=None):
+        """Mark as planned (layout decided)."""
+        from django.utils import timezone
+        mv = self.get_object()
+        if mv.status != 'REQUESTED':
+            return Response({'error': 'Must be REQUESTED first'}, status=400)
+
+        # Allow updating destination location during planning
+        to_location = request.data.get('to_location')
+        to_bin = request.data.get('to_bin')
+        if to_location:
+            mv.to_location = to_location
+        if to_bin is not None:
+            mv.to_bin = to_bin
+
+        mv.status = 'PLANNED'
+        mv.planned_by = request.user
+        mv.planned_at = timezone.now()
+        mv.save()
+        return Response(InternalMovementSerializer(mv).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def mark_moved(self, request, pk=None):
+        """Physically moved — updates BranchStock location."""
+        from django.utils import timezone
+        mv = self.get_object()
+        if mv.status not in ['PLANNED', 'REQUESTED']:
+            return Response({'error': 'Must be PLANNED or REQUESTED first'}, status=400)
+
+        # Update BranchStock location
+        try:
+            bs = BranchStock.objects.get(item=mv.item, branch=mv.branch)
+            bs.location = mv.to_location
+            if mv.to_bin:
+                bs.bin_number = mv.to_bin
+            bs.save()
+        except BranchStock.DoesNotExist:
+            pass
+
+        # Log the movement
+        WarehouseMovement.objects.create(
+            item=mv.item,
+            movement_type='TRANSFER',
+            quantity=mv.quantity,
+            from_location=mv.from_location,
+            to_location=mv.to_location,
+            reference=mv.movement_no,
+            reason=f"{mv.get_reason_display()}: {mv.notes or 'Internal relocation'}",
+            performed_by=request.user,
+        )
+
+        mv.status = 'MOVED'
+        mv.moved_by = request.user
+        mv.moved_at = timezone.now()
+        mv.save()
+        return Response(InternalMovementSerializer(mv).data)
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        """Verification confirms the move."""
+        from django.utils import timezone
+        mv = self.get_object()
+        if mv.status != 'MOVED':
+            return Response({'error': 'Must be MOVED first'}, status=400)
+
+        mv.status = 'VERIFIED'
+        mv.verified_by = request.user
+        mv.verified_at = timezone.now()
+        mv.verification_notes = request.data.get('notes', '')
+        mv.save()
+        return Response(InternalMovementSerializer(mv).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = InternalMovement.objects.all()
+        return Response({
+            'requested': qs.filter(status='REQUESTED').count(),
+            'planned': qs.filter(status='PLANNED').count(),
+            'moved': qs.filter(status='MOVED').count(),
+            'verified': qs.filter(status='VERIFIED').count(),
         })

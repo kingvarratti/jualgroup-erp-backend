@@ -6,6 +6,7 @@ from .models import (
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
+    StockTransferRequest, StockTransferItem, InternalMovement,
 )
 
 
@@ -313,5 +314,96 @@ class RequisitionRequestCreateSerializer(serializers.ModelSerializer):
                 quantity_requested=i.get('quantity_requested', 0),
             )
         return req
+
+
+
+
+class StockTransferItemSerializer(serializers.ModelSerializer):
+    item_detail = InventoryItemSerializer(source='item', read_only=True)
+
+    class Meta:
+        model = StockTransferItem
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class StockTransferRequestSerializer(serializers.ModelSerializer):
+    items = StockTransferItemSerializer(many=True, read_only=True)
+    from_branch_name = serializers.CharField(source='from_branch.name', read_only=True)
+    to_branch_name = serializers.CharField(source='to_branch.name', read_only=True)
+    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    type_display = serializers.CharField(source='get_transfer_type_display', read_only=True)
+    item_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StockTransferRequest
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'transfer_no', 'status', 'requested_by', 'waybill_no',
+            'approved_by', 'approved_at', 'rejected_by', 'rejected_at',
+            'dispatched_by', 'dispatched_at', 'received_by', 'received_at',
+            'created_at', 'updated_at',
+        ]
+
+    def get_item_count(self, obj):
+        return obj.items.count()
+
+
+class StockTransferRequestCreateSerializer(serializers.ModelSerializer):
+    items = serializers.JSONField(write_only=True, required=False)
+
+    class Meta:
+        model = StockTransferRequest
+        fields = [
+            'id', 'from_branch', 'to_branch', 'transfer_type',
+            'purpose', 'notes', 'items',
+        ]
+
+    def create(self, validated_data):
+        import json
+        items_data = validated_data.pop('items', [])
+        if isinstance(items_data, str):
+            try:
+                items_data = json.loads(items_data)
+            except Exception:
+                items_data = []
+
+        user = self.context['request'].user
+        req = StockTransferRequest.objects.create(requested_by=user, **validated_data)
+
+        for i in (items_data or []):
+            StockTransferItem.objects.create(
+                transfer=req,
+                item_id=i.get('item') or None,
+                description=i.get('description', ''),
+                uom=i.get('uom', 'pcs'),
+                quantity_requested=i.get('quantity_requested', 0),
+            )
+        return req
+
+
+
+
+class InternalMovementSerializer(serializers.ModelSerializer):
+    item_detail = InventoryItemSerializer(source='item', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True)
+    moved_by_name = serializers.CharField(source='moved_by.get_full_name', read_only=True)
+    verified_by_name = serializers.CharField(source='verified_by.get_full_name', read_only=True)
+    reason_display = serializers.CharField(source='get_reason_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = InternalMovement
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'movement_no', 'status',
+            'requested_by', 'planned_by', 'planned_at',
+            'moved_by', 'moved_at', 'verified_by', 'verified_at',
+            'created_at', 'updated_at',
+        ]
 
 

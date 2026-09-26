@@ -693,3 +693,199 @@ class RequisitionItem(models.Model):
 
     def __str__(self):
         return f"{self.description} x {self.quantity_requested}"
+
+
+
+
+class StockTransferRequest(models.Model):
+    """
+    Inter-branch stock transfer request.
+    Destination branch requests items from source branch.
+    """
+    TRANSFER_TYPE = (
+        ('STOCK', 'Stock Replenishment'),
+        ('PROJECT', 'Project Requirement'),
+    )
+
+    STATUS = (
+        ('REQUESTED', 'Requested'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('DISPATCHED', 'Dispatched'),
+        ('RECEIVED', 'Received'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer_no = models.CharField(max_length=30, unique=True, editable=False)
+
+    from_branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='transfers_out',
+        help_text='Branch sending the stock',
+    )
+    to_branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='transfers_in',
+        help_text='Branch receiving the stock',
+    )
+
+    transfer_type = models.CharField(
+        max_length=20, choices=TRANSFER_TYPE, default='STOCK',
+    )
+
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='transfers_requested',
+    )
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transfers_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transfers_rejected',
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+
+    dispatched_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transfers_dispatched',
+    )
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    waybill_no = models.CharField(max_length=30, blank=True)
+
+    received_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transfers_received',
+    )
+    received_at = models.DateTimeField(null=True, blank=True)
+    received_notes = models.TextField(blank=True)
+
+    purpose = models.CharField(max_length=200, blank=True)
+    notes = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS, default='REQUESTED')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Stock Transfer Request'
+        verbose_name_plural = 'Stock Transfer Requests'
+
+    def save(self, *args, **kwargs):
+        if not self.transfer_no:
+            self.transfer_no = f"TR-{uuid.uuid4().hex[:8].upper()}"
+        if self.status == 'DISPATCHED' and not self.waybill_no:
+            self.waybill_no = f"WB-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.transfer_no} ({self.from_branch.name} → {self.to_branch.name})"
+
+
+class StockTransferItem(models.Model):
+    """Line item for a StockTransferRequest."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer = models.ForeignKey(
+        StockTransferRequest, on_delete=models.CASCADE, related_name='items',
+    )
+    item = models.ForeignKey(
+        InventoryItem, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    description = models.CharField(max_length=300)
+    uom = models.CharField(max_length=20, default='pcs')
+    quantity_requested = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    quantity_approved = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    quantity_dispatched = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    quantity_received = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    remarks = models.CharField(max_length=200, blank=True)
+
+    def __str__(self):
+        return f"{self.description} x {self.quantity_requested}"
+
+
+
+
+class InternalMovement(models.Model):
+    """
+    Internal relocation of stock within a single branch.
+    Reasons: Space / Repairs / Access / Other.
+    """
+    REASON = (
+        ('SPACE', 'Space Optimization'),
+        ('REPAIRS', 'Send to Repairs'),
+        ('ACCESS', 'Accessibility'),
+        ('CONSOLIDATION', 'Consolidation'),
+        ('OTHER', 'Other'),
+    )
+
+    STATUS = (
+        ('REQUESTED', 'Requested'),
+        ('PLANNED', 'Layout Planned'),
+        ('MOVED', 'Physically Moved'),
+        ('VERIFIED', 'Verified'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    movement_no = models.CharField(max_length=30, unique=True, editable=False)
+    branch = models.ForeignKey(
+        Branch, on_delete=models.CASCADE,
+        related_name='internal_movements',
+    )
+    item = models.ForeignKey(
+        InventoryItem, on_delete=models.CASCADE,
+        related_name='internal_movements',
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reason = models.CharField(max_length=20, choices=REASON)
+    from_location = models.CharField(max_length=100)
+    to_location = models.CharField(max_length=100)
+    from_bin = models.CharField(max_length=50, blank=True)
+    to_bin = models.CharField(max_length=50, blank=True)
+
+    notes = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS, default='REQUESTED')
+
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='internal_movements_requested',
+    )
+    planned_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='internal_movements_planned',
+    )
+    planned_at = models.DateTimeField(null=True, blank=True)
+
+    moved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='internal_movements_moved',
+    )
+    moved_at = models.DateTimeField(null=True, blank=True)
+
+    verified_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='internal_movements_verified',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Internal Movement'
+        verbose_name_plural = 'Internal Movements'
+
+    def save(self, *args, **kwargs):
+        if not self.movement_no:
+            self.movement_no = f"IM-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.movement_no} — {self.item.part_number} @ {self.branch.name}"
