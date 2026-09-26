@@ -36,13 +36,11 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
     ordering_fields = ['part_number', 'quantity_on_hand', 'category', 'created_at']
 
     def get_permissions(self):
-        # Reports: exclusive to Stores/Admin
         if self.action == 'reports':
             return [IsAuthenticated(), IsStores()]
-        # Read actions: any authenticated user
-        if self.action in ['list', 'retrieve', 'reorder_alerts', 'low_stock', 'out_of_stock', 'stats']:
+        if self.action in ['list', 'retrieve', 'reorder_alerts', 'low_stock',
+                           'out_of_stock', 'stats', 'template']:
             return [IsAuthenticated()]
-        # Write actions: Stores only
         return [IsAuthenticated(), IsStores()]
 
     @action(detail=False, methods=['get'])
@@ -96,7 +94,6 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
     def reports(self, request):
         qs = self.get_queryset().filter(is_active=True)
 
-        # Category breakdown
         by_category = []
         for cat_code, cat_label in InventoryItem.CATEGORY_CHOICES:
             cat_items = qs.filter(category=cat_code)
@@ -112,12 +109,10 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             })
         by_category.sort(key=lambda x: x['value'], reverse=True)
 
-        # Summary
         total_value = sum((i.quantity_on_hand * i.unit_cost for i in qs), start=0)
         total_items = qs.count()
         total_units = sum((i.quantity_on_hand for i in qs), start=0)
 
-        # Top 10 highest value
         top_value = []
         for item in qs:
             val = item.quantity_on_hand * item.unit_cost
@@ -132,7 +127,6 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
         top_value.sort(key=lambda x: x['value'], reverse=True)
         top_value = top_value[:10]
 
-        # Top 10 low stock
         low_items = []
         for item in qs:
             if item.quantity_on_hand <= item.reorder_level:
@@ -149,7 +143,6 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
         low_items.sort(key=lambda x: x['shortfall'], reverse=True)
         top_low = low_items[:10]
 
-        # Movements (6 months)
         six_months_ago = timezone.now() - timedelta(days=180)
         movements = (
             WarehouseMovement.objects
@@ -181,6 +174,130 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             'top_value_items': top_value,
             'top_low_stock': top_low,
             'movements': list(by_month.values()),
+        })
+
+    @action(detail=False, methods=['get'])
+    def template(self, request):
+        import csv
+        from django.http import HttpResponse
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="inventory_import_template.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'part_number', 'description', 'manufacturer', 'category', 'uom',
+            'quantity_on_hand', 'reorder_level', 'safety_stock',
+            'unit_cost', 'unit_price', 'location', 'bin_number',
+        ])
+        writer.writerow([
+            'ABB-S201-C32', 'Miniature Circuit Breaker 32A 1P', 'ABB', 'ABB', 'pcs',
+            '50', '10', '5', '45.00', '60.00', 'A-01', 'B-101',
+        ])
+        writer.writerow([
+            'GRUN-CR5-12', 'Grundfos CR 5-12 Pump', 'Grundfos', 'PUMPS', 'pcs',
+            '5', '2', '1', '12500.00', '15500.00', 'B-05', 'B-202',
+        ])
+        writer.writerow([
+            'DAN-VALVE-DN50', 'Danfoss Butterfly Valve DN50', 'Danfoss', 'VALVES', 'pcs',
+            '20', '5', '2', '3200.00', '4100.00', 'C-03', 'C-301',
+        ])
+        return response
+
+    @action(detail=False, methods=['post'])
+    def bulk_import(self, request):
+        import csv
+        import io
+
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'error': 'No file uploaded'}, status=400)
+
+        if not file.name.lower().endswith('.csv'):
+            return Response({'error': 'File must be a CSV'}, status=400)
+
+        try:
+            decoded = file.read().decode('utf-8-sig')
+        except UnicodeDecodeError:
+            try:
+                file.seek(0)
+                decoded = file.read().decode('latin-1')
+            except Exception:
+                return Response({'error': 'Unable to read file encoding'}, status=400)
+
+        reader = csv.DictReader(io.StringIO(decoded))
+
+        required = ['part_number', 'description', 'uom']
+        created = []
+        updated = []
+        errors = []
+        skipped = 0
+
+        valid_categories = [c[0] for c in InventoryItem.CATEGORY_CHOICES]
+
+        for idx, row in enumerate(reader, start=2):
+            row = {k.strip().lower(): (v or '').strip() for k, v in row.items() if k}
+
+            missing = [f for f in required if not row.get(f)]
+            if missing:
+                errors.append({
+                    'row': idx,
+                    'error': f"Missing required fields: {', '.join(missing)}",
+                    'data': row,
+                })
+                continue
+
+            if not row.get('part_number'):
+                skipped += 1
+                continue
+
+            category = (row.get('category') or 'ABB').upper()
+            if category not in valid_categories:
+                category = 'ABB'
+
+            def to_num(val, default=0):
+                try:
+                    if not val or val == '':
+                        return default
+                    return float(str(val).replace(',', ''))
+                except (ValueError, TypeError):
+                    return default
+
+            payload = {
+                'description': row.get('description', ''),
+                'manufacturer': row.get('manufacturer', 'ABB'),
+                'category': category,
+                'uom': row.get('uom', 'pcs'),
+                'quantity_on_hand': to_num(row.get('quantity_on_hand'), 0),
+                'reorder_level': to_num(row.get('reorder_level'), 0),
+                'safety_stock': to_num(row.get('safety_stock'), 0),
+                'unit_cost': to_num(row.get('unit_cost'), 0),
+                'unit_price': to_num(row.get('unit_price'), 0),
+                'location': row.get('location', ''),
+                'bin_number': row.get('bin_number', ''),
+                'notes': row.get('notes', ''),
+                'is_active': True,
+            }
+
+            part_number = row['part_number']
+            existing = InventoryItem.objects.filter(part_number=part_number).first()
+
+            if existing:
+                for k, v in payload.items():
+                    setattr(existing, k, v)
+                existing.save()
+                updated.append(part_number)
+            else:
+                InventoryItem.objects.create(part_number=part_number, **payload)
+                created.append(part_number)
+
+        return Response({
+            'created': len(created),
+            'updated': len(updated),
+            'skipped': skipped,
+            'errors': errors,
+            'created_items': created[:50],
+            'updated_items': updated[:50],
         })
 
 
