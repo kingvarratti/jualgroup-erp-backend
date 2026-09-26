@@ -39,7 +39,7 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
         if self.action == 'reports':
             return [IsAuthenticated(), IsStores()]
         if self.action in ['list', 'retrieve', 'reorder_alerts', 'low_stock',
-                           'out_of_stock', 'stats', 'template']:
+                           'out_of_stock', 'stats', 'template', 'movements']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStores()]
 
@@ -299,6 +299,66 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             'created_items': created[:50],
             'updated_items': updated[:50],
         })
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def adjust_stock(self, request, pk=None):
+        """Adjust stock quantity with a reason and audit trail."""
+        from decimal import Decimal
+
+        item = self.get_object()
+
+        try:
+            new_qty = Decimal(str(request.data.get('new_quantity', 0)))
+        except (ValueError, TypeError):
+            return Response({'error': 'Invalid new_quantity value'}, status=400)
+
+        reason = (request.data.get('reason') or '').strip()
+        notes = (request.data.get('notes') or '').strip()
+
+        if not reason:
+            return Response({'error': 'Reason is required'}, status=400)
+
+        old_qty = item.quantity_on_hand
+        delta = new_qty - old_qty
+
+        if delta == 0:
+            return Response(
+                {'error': 'New quantity is the same as current quantity'},
+                status=400,
+            )
+
+        item.quantity_on_hand = new_qty
+        item.save()
+
+        movement = WarehouseMovement.objects.create(
+            item=item,
+            movement_type='ADJUST',
+            quantity=abs(delta),
+            from_location=str(old_qty),
+            to_location=str(new_qty),
+            reference=f"ADJUST-{reason}",
+            reason=notes or reason,
+            performed_by=request.user,
+        )
+
+        return Response({
+            'success': True,
+            'old_quantity': float(old_qty),
+            'new_quantity': float(new_qty),
+            'delta': float(delta),
+            'reason': reason,
+            'movement_id': movement.id,
+            'item': InventoryItemSerializer(item).data,
+        })
+
+    @action(detail=True, methods=['get'])
+    def movements(self, request, pk=None):
+        """Get stock movement history for a specific item."""
+        item = self.get_object()
+        qs = WarehouseMovement.objects.filter(item=item).order_by('-timestamp')[:50]
+        return Response(WarehouseMovementSerializer(qs, many=True).data)
+    
 
 
 class StockRequisitionViewSet(viewsets.ModelViewSet):
