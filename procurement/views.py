@@ -10,14 +10,15 @@ from django.utils import timezone
 from datetime import timedelta
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import (
-    InventoryItem, StockRequisition, StockRequisitionItem,
+    InventoryItem, BranchStock, StockRequisition, StockRequisitionItem,
     Supplier, SupplierRFQ, SupplierQuote,
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
 )
 from .serializers import (
-    InventoryItemSerializer, StockRequisitionSerializer, StockRequisitionItemSerializer,
+    InventoryItemSerializer, BranchStockSerializer, StockRequisitionSerializer,
+    StockRequisitionItemSerializer,
     SupplierSerializer, SupplierRFQSerializer, SupplierQuoteSerializer,
     PurchaseOrderSerializer, PurchaseOrderCreateSerializer, PurchaseOrderItemSerializer,
     GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
@@ -35,6 +36,22 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
     filterset_fields = ['category', 'is_active', 'manufacturer']
     search_fields = ['part_number', 'description', 'location', 'bin_number']
     ordering_fields = ['part_number', 'quantity_on_hand', 'category', 'created_at']
+
+    def perform_create(self, serializer):
+        from core.models import Branch
+        item = serializer.save()
+
+        branch = Branch.objects.filter(is_active=True).first()
+        if branch:
+            BranchStock.objects.create(
+                item=item,
+                branch=branch,
+                quantity_on_hand=item.quantity_on_hand,
+                reorder_level=item.reorder_level,
+                safety_stock=item.safety_stock,
+                location=item.location,
+                bin_number=item.bin_number,
+            )
 
     def get_permissions(self):
         if self.action == 'reports':
@@ -823,3 +840,60 @@ class EnquirySourcingViewSet(viewsets.ModelViewSet):
             'sent_to_sales': qs.filter(status='SENT_TO_SALES').count(),
             'total_active': qs.exclude(status__in=['CLOSED', 'SENT_TO_SALES']).count(),
         })
+
+
+
+class BranchStockViewSet(viewsets.ModelViewSet):
+    queryset = BranchStock.objects.all().select_related('item', 'branch')
+    serializer_class = BranchStockSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['branch', 'item']
+    permission_classes = [IsAuthenticated, IsStores]
+
+    @action(detail=True, methods=['post'])
+    def adjust(self, request, pk=None):
+        """Adjust branch stock with a reason."""
+        from decimal import Decimal
+        from django.utils import timezone
+
+        bs = self.get_object()
+
+        try:
+            new_qty = Decimal(str(request.data.get('new_quantity', 0)))
+        except (ValueError, TypeError):
+            return Response({'error': 'Invalid new_quantity'}, status=400)
+
+        reason = (request.data.get('reason') or '').strip()
+        notes = (request.data.get('notes') or '').strip()
+
+        if not reason:
+            return Response({'error': 'Reason is required'}, status=400)
+
+        old_qty = bs.quantity_on_hand
+        delta = new_qty - old_qty
+        if delta == 0:
+            return Response({'error': 'Quantity unchanged'}, status=400)
+
+        bs.quantity_on_hand = new_qty
+        bs.save()
+
+        # Also update the master item quantity
+        item = bs.item
+        other_total = sum(
+            b.quantity_on_hand for b in item.branch_stocks.exclude(id=bs.id)
+        )
+        item.quantity_on_hand = other_total + new_qty
+        item.save()
+
+        WarehouseMovement.objects.create(
+            item=item,
+            movement_type='ADJUST',
+            quantity=abs(delta),
+            from_location=str(old_qty),
+            to_location=str(new_qty),
+            reference=f"ADJUST-{reason}",
+            reason=f"{bs.branch.name}: {notes or reason}",
+            performed_by=request.user,
+        )
+
+        return Response(BranchStockSerializer(bs).data)

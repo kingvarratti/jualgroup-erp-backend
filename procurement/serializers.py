@@ -1,11 +1,26 @@
 from rest_framework import serializers
 from .models import (
-    InventoryItem, StockRequisition, StockRequisitionItem,
+    InventoryItem, BranchStock, StockRequisition, StockRequisitionItem,
     Supplier, SupplierRFQ, SupplierQuote,
     PurchaseOrder, PurchaseOrderItem,
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
 )
+
+
+class BranchStockSerializer(serializers.ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    item_part_number = serializers.CharField(source='item.part_number', read_only=True)
+    item_description = serializers.CharField(source='item.description', read_only=True)
+    item_uom = serializers.CharField(source='item.uom', read_only=True)
+    needs_reorder = serializers.BooleanField(read_only=True)
+    is_out_of_stock = serializers.BooleanField(read_only=True)
+    stock_status = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = BranchStock
+        fields = '__all__'
+        read_only_fields = ['id', 'updated_at']
 
 
 class InventoryItemSerializer(serializers.ModelSerializer):
@@ -14,6 +29,7 @@ class InventoryItemSerializer(serializers.ModelSerializer):
     stock_status = serializers.CharField(read_only=True)
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     category_display = serializers.CharField(source='get_category_display', read_only=True)
+    branch_stocks = BranchStockSerializer(many=True, read_only=True)
 
     class Meta:
         model = InventoryItem

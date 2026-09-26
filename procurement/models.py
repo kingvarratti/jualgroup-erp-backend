@@ -1,6 +1,6 @@
 import uuid
 from django.db import models
-from core.models import User
+from core.models import User, Branch
 from sales.models import ClientPO, Enquiry
 
 
@@ -68,6 +68,105 @@ class InventoryItem(models.Model):
     def __str__(self):
         return f"{self.part_number} - {self.description}"
 
+
+
+
+class BranchStock(models.Model):
+    """
+    Physical stock of an InventoryItem at a specific Branch.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.CASCADE,
+        related_name='branch_stocks',
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name='stocks',
+    )
+    quantity_on_hand = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reorder_level = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    safety_stock = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    location = models.CharField(max_length=100, blank=True, help_text='Shelf/Rack')
+    bin_number = models.CharField(max_length=50, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('item', 'branch')
+        ordering = ['item__part_number', 'branch__name']
+        verbose_name = 'Branch Stock'
+        verbose_name_plural = 'Branch Stocks'
+
+    @property
+    def needs_reorder(self):
+        return self.quantity_on_hand <= self.reorder_level
+
+    @property
+    def is_out_of_stock(self):
+        return self.quantity_on_hand <= 0
+
+    @property
+    def stock_status(self):
+        if self.quantity_on_hand <= 0:
+            return 'OUT_OF_STOCK'
+        if self.quantity_on_hand <= self.reorder_level:
+            return 'LOW_STOCK'
+        return 'IN_STOCK'
+
+    def __str__(self):
+        return f"{self.item.part_number} @ {self.branch.name}: {self.quantity_on_hand}"
+
+
+
+
+class BranchStock(models.Model):
+    """
+    Physical stock of an InventoryItem at a specific Branch.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.CASCADE,
+        related_name='branch_stocks',
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name='stocks',
+    )
+    quantity_on_hand = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reorder_level = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    safety_stock = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    location = models.CharField(max_length=100, blank=True, help_text='Shelf/Rack')
+    bin_number = models.CharField(max_length=50, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('item', 'branch')
+        ordering = ['item__part_number', 'branch__name']
+        verbose_name = 'Branch Stock'
+        verbose_name_plural = 'Branch Stocks'
+
+    @property
+    def needs_reorder(self):
+        return self.quantity_on_hand <= self.reorder_level
+
+    @property
+    def is_out_of_stock(self):
+        return self.quantity_on_hand <= 0
+
+    @property
+    def stock_status(self):
+        if self.quantity_on_hand <= 0:
+            return 'OUT_OF_STOCK'
+        if self.quantity_on_hand <= self.reorder_level:
+            return 'LOW_STOCK'
+        return 'IN_STOCK'
+
+    def __str__(self):
+        return f"{self.item.part_number} @ {self.branch.name}: {self.quantity_on_hand}"
 
 class StockRequisition(models.Model):
     STATUS = (

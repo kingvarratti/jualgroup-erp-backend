@@ -1,14 +1,15 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    InventoryItemViewSet, StockRequisitionViewSet, SupplierViewSet,
-    SupplierRFQViewSet, SupplierQuoteViewSet, PurchaseOrderViewSet,
+    InventoryItemViewSet, BranchStockViewSet, StockRequisitionViewSet,
+    SupplierViewSet, SupplierRFQViewSet, SupplierQuoteViewSet, PurchaseOrderViewSet,
     GoodsReceivedNoteViewSet, SupplierPaymentViewSet, WarehouseMovementViewSet,
     EnquirySourcingViewSet,
 )
 
 router = DefaultRouter()
 router.register('inventory', InventoryItemViewSet)
+router.register('branch-stocks', BranchStockViewSet)
 router.register('stock-requisitions', StockRequisitionViewSet)
 router.register('suppliers', SupplierViewSet)
 router.register('rfqs', SupplierRFQViewSet)
