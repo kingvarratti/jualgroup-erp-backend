@@ -19,6 +19,9 @@ class QuotationLineItemSerializer(serializers.ModelSerializer):
         model = QuotationLineItem
         fields = '__all__'
         read_only_fields = ['id', 'total']
+        extra_kwargs = {
+            'quotation': {'required': False, 'allow_null': True},
+        }
 
 
 class QuotationSerializer(serializers.ModelSerializer):
