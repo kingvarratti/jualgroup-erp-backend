@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from core.models import User
+from decimal import Decimal
 
 
 class LeaveType(models.Model):
@@ -132,38 +133,147 @@ class PerformanceAppraisal(models.Model):
 class PayrollCycle(models.Model):
     STATUS = (
         ('OPEN', 'Open'),
-        ('PROCESSING', 'Processing'),
+        ('COLLECTING', 'Collecting Data'),
+        ('CALCULATED', 'Calculated'),
+        ('PENDING_APPROVAL', 'Pending Approval'),
         ('APPROVED', 'Approved'),
+        ('PROCESSED', 'Processed'),
         ('PAID', 'Paid'),
     )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     month = models.IntegerField()
     year = models.IntegerField()
-    status = models.CharField(max_length=20, choices=STATUS, default='OPEN')
-    processed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='payrolls_processed')
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='payrolls_approved')
+    status = models.CharField(max_length=30, choices=STATUS, default='OPEN')
+    notes = models.TextField(blank=True)
+
+    processed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='payrolls_processed',
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='payrolls_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ('month', 'year')
+        ordering = ['-year', '-month']
+
+    def __str__(self):
+        return f"{self.get_month_display() if hasattr(self, 'get_month_display') else self.month}/{self.year}"
+
+    @property
+    def total_gross(self):
+        return sum((p.gross_pay for p in self.payslips.all()), 0)
+
+    @property
+    def total_net(self):
+        return sum((p.net_pay for p in self.payslips.all()), 0)
+
+    @property
+    def total_deductions(self):
+        return sum((p.deductions for p in self.payslips.all()), 0)
 
 
 class Payslip(models.Model):
-    payroll_cycle = models.ForeignKey(PayrollCycle, on_delete=models.CASCADE, related_name='payslips')
-    employee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payslips')
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payroll_cycle = models.ForeignKey(
+        PayrollCycle, on_delete=models.CASCADE, related_name='payslips',
+    )
+    employee = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='payslips',
+    )
+
+    # Earnings
     basic_salary = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     allowances = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     overtime = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    deductions = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    bonus = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     gross_pay = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    # Deductions
+    ssnit_employee = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0,
+        help_text='Employee SSNIT contribution (5.5%)',
+    )
+    ssnit_employer = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0,
+        help_text='Employer SSNIT contribution (13%)',
+    )
+    paye_tax = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0,
+        help_text='PAYE income tax',
+    )
+    loan_deduction = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    other_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     net_pay = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    file = models.FileField(upload_to='payslips/%Y/%m/', null=True, blank=True)
+
+    # Banking
+    bank_name = models.CharField(max_length=100, blank=True)
+    bank_account = models.CharField(max_length=50, blank=True)
+
+    payslip_file = models.FileField(
+        upload_to='payslips/%Y/%m/', null=True, blank=True,
+    )
+    notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('payroll_cycle', 'employee')
+        ordering = ['employee__first_name', 'employee__last_name']
+
+    @property
+    def deductions(self):
+        return self.total_deductions
+
+    def calculate(self):
+        """Auto-calculate gross, deductions, net."""
+        self.gross_pay = self.basic_salary + self.allowances + self.overtime + self.bonus
+
+        # SSNIT employee (5.5% of basic)
+        self.ssnit_employee = round(self.basic_salary * Decimal('0.055'), 2)
+        # SSNIT employer (13% of basic)
+        self.ssnit_employer = round(self.basic_salary * Decimal('0.13'), 2)
+
+        # PAYE - simplified (tiered on taxable income)
+        taxable = self.gross_pay - self.ssnit_employee
+        self.paye_tax = self._calculate_paye(taxable)
+
+        self.total_deductions = (
+            self.ssnit_employee + self.paye_tax +
+            self.loan_deduction + self.other_deductions
+        )
+        self.net_pay = self.gross_pay - self.total_deductions
+
+    def _calculate_paye(self, taxable):
+        """Simplified Ghana PAYE (monthly)."""
+        if taxable <= Decimal('490'):
+            return Decimal('0')
+        elif taxable <= Decimal('600'):
+            return (taxable - Decimal('490')) * Decimal('0.05')
+        elif taxable <= Decimal('730'):
+            return Decimal('5.50') + (taxable - Decimal('600')) * Decimal('0.10')
+        elif taxable <= Decimal('3896.67'):
+            return Decimal('18.50') + (taxable - Decimal('730')) * Decimal('0.175')
+        elif taxable <= Decimal('19896.67'):
+            return Decimal('572.67') + (taxable - Decimal('3896.67')) * Decimal('0.25')
+        else:
+            return Decimal('4572.67') + (taxable - Decimal('19896.67')) * Decimal('0.30')
 
     def save(self, *args, **kwargs):
-        self.gross_pay = self.basic_salary + self.allowances + self.overtime
-        self.net_pay = self.gross_pay - self.deductions
+        self.calculate()
         super().save(*args, **kwargs)
 
+    def __str__(self):
+        return f"{self.employee.username} - {self.payroll_cycle.month}/{self.payroll_cycle.year}"
 
 class ExitProcess(models.Model):
     TYPE = (

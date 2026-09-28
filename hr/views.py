@@ -4,6 +4,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from decimal import Decimal
+from core.models import User
+from .models import PayrollCycle, Payslip
 
 from .models import (
     LeaveType, LeaveBalance, LeaveApplication,
@@ -226,10 +229,131 @@ class PayrollCycleViewSet(viewsets.ModelViewSet):
     queryset = PayrollCycle.objects.all().prefetch_related('payslips')
     serializer_class = PayrollCycleSerializer
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'year']
+
+    def perform_create(self, serializer):
+        serializer.save(processed_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def collect_data(self, request, pk=None):
+        """Auto-create payslips for all active employees."""
+        cycle = self.get_object()
+        if cycle.status not in ['OPEN', 'COLLECTING']:
+            return Response({'error': 'Cannot collect data at this stage'}, status=400)
+
+        created = 0
+        for user in User.objects.filter(is_active=True, is_active_employee=True):
+            _, was_created = Payslip.objects.get_or_create(
+                payroll_cycle=cycle,
+                employee=user,
+                defaults={
+                    'basic_salary': Decimal('0'),
+                    'bank_name': '',
+                    'bank_account': '',
+                },
+            )
+            if was_created:
+                created += 1
+
+        cycle.status = 'COLLECTING'
+        cycle.save()
+        return Response({
+            'created': created,
+            'total': cycle.payslips.count(),
+            'cycle': PayrollCycleSerializer(cycle).data,
+        })
+
+    @action(detail=True, methods=['post'])
+    def calculate(self, request, pk=None):
+        """Recalculate all payslips in this cycle."""
+        cycle = self.get_object()
+        if cycle.payslips.count() == 0:
+            return Response({'error': 'No payslips to calculate'}, status=400)
+
+        for payslip in cycle.payslips.all():
+            payslip.save()  # triggers recalculate
+
+        cycle.status = 'CALCULATED'
+        cycle.save()
+        return Response(PayrollCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def submit_for_approval(self, request, pk=None):
+        cycle = self.get_object()
+        if cycle.status != 'CALCULATED':
+            return Response({'error': 'Must be calculated first'}, status=400)
+        cycle.status = 'PENDING_APPROVAL'
+        cycle.save()
+        return Response(PayrollCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from django.utils import timezone
+        cycle = self.get_object()
+        if cycle.status != 'PENDING_APPROVAL':
+            return Response({'error': 'Not pending approval'}, status=400)
+        cycle.status = 'APPROVED'
+        cycle.approved_by = request.user
+        cycle.approved_at = timezone.now()
+        cycle.save()
+        return Response(PayrollCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def process(self, request, pk=None):
+        from django.utils import timezone
+        cycle = self.get_object()
+        if cycle.status != 'APPROVED':
+            return Response({'error': 'Must be approved first'}, status=400)
+        cycle.status = 'PROCESSED'
+        cycle.processed_at = timezone.now()
+        cycle.save()
+        return Response(PayrollCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_paid(self, request, pk=None):
+        cycle = self.get_object()
+        if cycle.status != 'PROCESSED':
+            return Response({'error': 'Must be processed first'}, status=400)
+        cycle.status = 'PAID'
+        cycle.save()
+        return Response(PayrollCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['get'])
+    def bank_transfer_csv(self, request, pk=None):
+        """Download bank transfer instructions as CSV."""
+        import csv
+        from django.http import HttpResponse
+        cycle = self.get_object()
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="bank-transfers-{cycle.year}-{cycle.month:02d}.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['Employee ID', 'Name', 'Bank', 'Account Number', 'Amount (GHS)'])
+        for p in cycle.payslips.all():
+            writer.writerow([
+                p.employee.employee_id or '',
+                p.employee.get_full_name() or p.employee.username,
+                p.bank_name or '',
+                p.bank_account or '',
+                f'{p.net_pay:.2f}',
+            ])
+        return response
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = PayrollCycle.objects.all()
+        return Response({
+            'total_cycles': qs.count(),
+            'open': qs.filter(status='OPEN').count(),
+            'pending_approval': qs.filter(status='PENDING_APPROVAL').count(),
+            'approved': qs.filter(status='APPROVED').count(),
+            'processed': qs.filter(status='PROCESSED').count(),
+            'paid': qs.filter(status='PAID').count(),
+        })
 
 
 class PayslipViewSet(viewsets.ModelViewSet):
-    queryset = Payslip.objects.all()
+    queryset = Payslip.objects.all().select_related('payroll_cycle', 'employee')
     serializer_class = PayslipSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
@@ -239,8 +363,6 @@ class PayslipViewSet(viewsets.ModelViewSet):
     def my_payslips(self, request):
         slips = self.get_queryset().filter(employee=request.user)
         return Response(PayslipSerializer(slips, many=True).data)
-
-
 class ExitProcessViewSet(viewsets.ModelViewSet):
     queryset = ExitProcess.objects.all().prefetch_related('clearances', 'interviews')
     serializer_class = ExitProcessSerializer
