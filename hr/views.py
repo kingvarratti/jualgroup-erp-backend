@@ -363,32 +363,158 @@ class PayslipViewSet(viewsets.ModelViewSet):
     def my_payslips(self, request):
         slips = self.get_queryset().filter(employee=request.user)
         return Response(PayslipSerializer(slips, many=True).data)
+    
 class ExitProcessViewSet(viewsets.ModelViewSet):
-    queryset = ExitProcess.objects.all().prefetch_related('clearances', 'interviews')
+    queryset = ExitProcess.objects.all().prefetch_related('clearances', 'interviews').select_related('employee')
     serializer_class = ExitProcessSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status', 'employee', 'exit_type']
 
+    def perform_create(self, serializer):
+        process = serializer.save()
+        departments = ['FINANCE', 'STORES', 'IT', 'HR', 'ADMIN', 'PRODUCTION']
+        for dept_code in departments:
+            ExitClearance.objects.create(exit_process=process, department=dept_code)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        """Accept the resignation/termination and set last working day."""
+        from datetime import timedelta
+        process = self.get_object()
+        if process.status != 'INITIATED':
+            return Response({'error': 'Already processed'}, status=400)
+
+        process.last_working_day = process.resignation_date + timedelta(days=process.notice_period_days)
+        process.status = 'ACCEPTED'
+        process.accepted_by = request.user
+        process.accepted_at = timezone.now()
+        if 'acceptance_letter' in request.FILES:
+            process.acceptance_letter = request.FILES['acceptance_letter']
+        process.save()
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        process = self.get_object()
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason required'}, status=400)
+        process.status = 'CANCELLED'
+        process.close_notes = reason
+        process.save()
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=True, methods=['post'])
+    def initiate_clearance(self, request, pk=None):
+        process = self.get_object()
+        if process.status != 'ACCEPTED':
+            return Response({'error': 'Must be ACCEPTED first'}, status=400)
+        process.status = 'CLEARANCE'
+        process.clearance_initiated_at = timezone.now()
+        process.save()
+        return Response(ExitProcessSerializer(process).data)
+
     @action(detail=True, methods=['post'])
     def clear_department(self, request, pk=None):
-        exit_proc = self.get_object()
+        """Mark a specific department as cleared."""
+        process = self.get_object()
         dept = request.data.get('department')
-        clearance = exit_proc.clearances.filter(department=dept).first()
-        if clearance:
-            clearance.is_cleared = True
-            clearance.cleared_by = request.user
-            clearance.cleared_at = timezone.now()
-            clearance.remarks = request.data.get('remarks', '')
-            clearance.save()
-        else:
-            ExitClearance.objects.create(
-                exit_process=exit_proc, department=dept,
-                cleared_by=request.user, is_cleared=True,
-                cleared_at=timezone.now(),
-            )
-        all_cleared = all(c.is_cleared for c in exit_proc.clearances.all())
+        remarks = request.data.get('remarks', '')
+
+        try:
+            clearance = process.clearances.get(department=dept)
+        except ExitClearance.DoesNotExist:
+            return Response({'error': 'Department not found'}, status=404)
+
+        clearance.is_cleared = True
+        clearance.cleared_by = request.user
+        clearance.cleared_at = timezone.now()
+        clearance.remarks = remarks
+        clearance.save()
+
+        all_cleared = all(c.is_cleared for c in process.clearances.all())
         if all_cleared:
-            exit_proc.status = 'CLEARED'
-            exit_proc.save()
-        return Response(ExitProcessSerializer(exit_proc).data)
+            process.status = 'CLEARED'
+            process.save()
+
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=True, methods=['post'])
+    def process_final_settlement(self, request, pk=None):
+        process = self.get_object()
+        if process.status != 'CLEARED':
+            return Response({'error': 'All departments must clear first'}, status=400)
+
+        amount = request.data.get('amount')
+        if not amount:
+            return Response({'error': 'Final settlement amount required'}, status=400)
+
+        process.final_settlement_amount = amount
+        process.final_settlement_processed_by = request.user
+        process.final_settlement_processed_at = timezone.now()
+        process.status = 'FINAL_SETTLEMENT'
+        process.save()
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=True, methods=['post'])
+    def add_interview(self, request, pk=None):
+        process = self.get_object()
+        data = request.data
+
+        interview = ExitInterview.objects.create(
+            exit_process=process,
+            interview_date=data.get('interview_date'),
+            conducted_by=request.user,
+            job_satisfaction=data.get('job_satisfaction') or None,
+            role_clarity=data.get('role_clarity') or None,
+            supervisor_rating=data.get('supervisor_rating') or None,
+            leadership_confidence=data.get('leadership_confidence') or None,
+            pay_fairness=data.get('pay_fairness') or None,
+            benefits_satisfaction=data.get('benefits_satisfaction') or None,
+            work_life_balance=data.get('work_life_balance') or None,
+            team_collaboration=data.get('team_collaboration') or None,
+            growth_opportunities=data.get('growth_opportunities') or None,
+            training_quality=data.get('training_quality') or None,
+            reason_for_leaving=data.get('reason_for_leaving', ''),
+            what_liked_most=data.get('what_liked_most', ''),
+            what_could_improve=data.get('what_could_improve', ''),
+            could_have_stayed=data.get('could_have_stayed', ''),
+            additional_comments=data.get('additional_comments', ''),
+            would_recommend=data.get('would_recommend'),
+            overall_experience=data.get('overall_experience') or None,
+        )
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        """Close the exit process and deactivate the employee."""
+        process = self.get_object()
+        if process.status not in ['FINAL_SETTLEMENT', 'CLEARED']:
+            return Response({'error': 'Must be at Final Settlement stage'}, status=400)
+
+        process.status = 'CLOSED'
+        process.close_notes = request.data.get('notes', '')
+        if 'exit_documents' in request.FILES:
+            process.exit_documents = request.FILES['exit_documents']
+        process.save()
+
+        employee = process.employee
+        employee.is_active_employee = False
+        employee.is_active = False
+        employee.save()
+
+        return Response(ExitProcessSerializer(process).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = ExitProcess.objects.all()
+        return Response({
+            'total': qs.count(),
+            'initiated': qs.filter(status='INITIATED').count(),
+            'accepted': qs.filter(status='ACCEPTED').count(),
+            'clearance': qs.filter(status='CLEARANCE').count(),
+            'cleared': qs.filter(status='CLEARED').count(),
+            'final_settlement': qs.filter(status='FINAL_SETTLEMENT').count(),
+            'closed': qs.filter(status='CLOSED').count(),
+        })

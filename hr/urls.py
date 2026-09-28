@@ -9,12 +9,12 @@ from .views import (
 router = DefaultRouter()
 router.register('leave-types', LeaveTypeViewSet)
 router.register('leave-balances', LeaveBalanceViewSet, basename='leave-balance')
-router.register('leave-applications', LeaveApplicationViewSet)
+router.register('leave-applications', LeaveApplicationViewSet, basename='leave-application')
 router.register('performance-cycles', PerformanceCycleViewSet)
 router.register('kpis', KPIViewSet)
 router.register('appraisals', PerformanceAppraisalViewSet)
 router.register('payroll-cycles', PayrollCycleViewSet)
 router.register('payslips', PayslipViewSet)
-router.register('exit-processes', ExitProcessViewSet)
+router.register('exit-processes', ExitProcessViewSet, basename='exit-process')
 
 urlpatterns = [path('', include(router.urls))]

@@ -104,22 +104,56 @@ class PayrollCycleSerializer(serializers.ModelSerializer):
 
 
 class ExitClearanceSerializer(serializers.ModelSerializer):
+    department_display = serializers.CharField(source='get_department_display', read_only=True)
+    cleared_by_name = serializers.CharField(source='cleared_by.get_full_name', read_only=True)
+
     class Meta:
         model = ExitClearance
         fields = '__all__'
+        read_only_fields = ['id', 'cleared_by', 'cleared_at']
 
 
 class ExitInterviewSerializer(serializers.ModelSerializer):
+    conducted_by_name = serializers.CharField(source='conducted_by.get_full_name', read_only=True)
+
     class Meta:
         model = ExitInterview
         fields = '__all__'
+        read_only_fields = ['id', 'conducted_by', 'created_at']
 
 
 class ExitProcessSerializer(serializers.ModelSerializer):
     clearances = ExitClearanceSerializer(many=True, read_only=True)
-    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    interviews = ExitInterviewSerializer(many=True, read_only=True)
+    employee_name = serializers.SerializerMethodField()
+    employee_id = serializers.CharField(source='employee.employee_id', read_only=True)
+    employee_department = serializers.CharField(source='employee.department', read_only=True)
+    exit_type_display = serializers.CharField(source='get_exit_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    accepted_by_name = serializers.CharField(source='accepted_by.get_full_name', read_only=True)
+    clearance_progress = serializers.SerializerMethodField()
 
     class Meta:
         model = ExitProcess
         fields = '__all__'
-        read_only_fields = ['id', 'process_no', 'status', 'created_at']
+        read_only_fields = [
+            'id', 'process_no', 'status',
+            'accepted_by', 'accepted_at', 'clearance_initiated_at',
+            'final_settlement_processed_by', 'final_settlement_processed_at',
+            'created_at', 'updated_at',
+        ]
+
+    def get_employee_name(self, obj):
+        name = obj.employee.get_full_name()
+        return name or obj.employee.username
+
+    def get_clearance_progress(self, obj):
+        total = obj.clearances.count()
+        if total == 0:
+            return {'total': 0, 'cleared': 0, 'percent': 0}
+        cleared = obj.clearances.filter(is_cleared=True).count()
+        return {
+            'total': total,
+            'cleared': cleared,
+            'percent': int((cleared / total) * 100),
+        }

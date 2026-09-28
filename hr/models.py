@@ -280,6 +280,7 @@ class ExitProcess(models.Model):
         ('RESIGNATION', 'Resignation'),
         ('TERMINATION', 'Termination'),
         ('RETIREMENT', 'Retirement'),
+        ('CONTRACT_END', 'Contract End'),
     )
     STATUS = (
         ('INITIATED', 'Initiated'),
@@ -288,7 +289,9 @@ class ExitProcess(models.Model):
         ('CLEARED', 'All Cleared'),
         ('FINAL_SETTLEMENT', 'Final Settlement'),
         ('CLOSED', 'Closed'),
+        ('CANCELLED', 'Cancelled'),
     )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     process_no = models.CharField(max_length=30, unique=True, editable=False)
     employee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='exit_processes')
@@ -296,11 +299,48 @@ class ExitProcess(models.Model):
     resignation_date = models.DateField()
     last_working_day = models.DateField(null=True, blank=True)
     notice_period_days = models.IntegerField(default=30)
-    acceptance_letter = models.FileField(upload_to='exit/acceptance/%Y/%m/', null=True, blank=True)
+
+    reason = models.TextField(blank=True)
+
+    # Acceptance
+    accepted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='exit_accepted',
+    )
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    acceptance_letter = models.FileField(
+        upload_to='exit/acceptance/%Y/%m/', null=True, blank=True,
+    )
+
+    # Clearance
+    clearance_initiated_at = models.DateTimeField(null=True, blank=True)
     clearance_notes = models.TextField(blank=True)
+
+    # Final settlement
+    final_settlement_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True,
+    )
+    final_settlement_processed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='exit_settlements_processed',
+    )
+    final_settlement_processed_at = models.DateTimeField(null=True, blank=True)
+
+    # Exit docs
+    exit_documents = models.FileField(
+        upload_to='exit/documents/%Y/%m/', null=True, blank=True,
+    )
+    close_notes = models.TextField(blank=True)
+
     status = models.CharField(max_length=30, choices=STATUS, default='INITIATED')
-    final_settlement_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Exit Process'
+        verbose_name_plural = 'Exit Processes'
 
     def save(self, *args, **kwargs):
         if not self.process_no:
@@ -309,6 +349,35 @@ class ExitProcess(models.Model):
 
     def __str__(self):
         return self.process_no
+
+
+class ExitClearance(models.Model):
+    DEPARTMENTS = (
+        ('FINANCE', 'Finance'),
+        ('STORES', 'Stores / Warehouse'),
+        ('IT', 'IT'),
+        ('HR', 'HR'),
+        ('ADMIN', 'Admin'),
+        ('PRODUCTION', 'Production'),
+    )
+
+    exit_process = models.ForeignKey(
+        ExitProcess, on_delete=models.CASCADE, related_name='clearances',
+    )
+    department = models.CharField(max_length=30, choices=DEPARTMENTS)
+    cleared_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    is_cleared = models.BooleanField(default=False)
+    remarks = models.TextField(blank=True)
+    cleared_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('exit_process', 'department')
+        ordering = ['department']
+
+    def __str__(self):
+        return f"{self.exit_process.process_no} - {self.get_department_display()}"
 
 
 class ExitClearance(models.Model):
@@ -321,9 +390,81 @@ class ExitClearance(models.Model):
 
 
 class ExitInterview(models.Model):
-    exit_process = models.ForeignKey(ExitProcess, on_delete=models.CASCADE, related_name='interviews')
+    """Comprehensive exit interview with structured questions."""
+    exit_process = models.ForeignKey(
+        ExitProcess, on_delete=models.CASCADE, related_name='interviews',
+    )
     interview_date = models.DateField()
-    conducted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    feedback = models.TextField()
-    would_recommend = models.BooleanField(null=True, blank=True)
+    conducted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+    )
+
+    # --- Job & Role Satisfaction (1-5 scale) ---
+    job_satisfaction = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='1=Very Dissatisfied, 5=Very Satisfied',
+    )
+    role_clarity = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='Clarity of job responsibilities',
+    )
+
+    # --- Management & Supervision (1-5 scale) ---
+    supervisor_rating = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='Relationship with immediate supervisor',
+    )
+    leadership_confidence = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='Confidence in senior leadership',
+    )
+
+    # --- Compensation & Benefits (1-5 scale) ---
+    pay_fairness = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='Fairness of pay for work performed',
+    )
+    benefits_satisfaction = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+    )
+
+    # --- Work Environment (1-5 scale) ---
+    work_life_balance = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+    )
+    team_collaboration = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+        help_text='Working relationship with colleagues',
+    )
+
+    # --- Career Growth (1-5 scale) ---
+    growth_opportunities = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+    )
+    training_quality = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+    )
+
+    # --- Open-ended feedback ---
+    reason_for_leaving = models.TextField(blank=True)
+    what_liked_most = models.TextField(blank=True)
+    what_could_improve = models.TextField(blank=True)
+    could_have_stayed = models.TextField(blank=True)
+    additional_comments = models.TextField(blank=True)
+
+    # --- Overall ---
+    would_recommend = models.BooleanField(
+        null=True, blank=True,
+        help_text='Would recommend company as a place to work',
+    )
+    overall_experience = models.IntegerField(
+        choices=[(i, str(i)) for i in range(1, 6)], null=True, blank=True,
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-interview_date']
+
+    def __str__(self):
+        return f"Exit Interview for {self.exit_process.process_no} on {self.interview_date}"
