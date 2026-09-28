@@ -8,7 +8,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register('leave-types', LeaveTypeViewSet)
-router.register('leave-balances', LeaveBalanceViewSet)
+router.register('leave-balances', LeaveBalanceViewSet, basename='leave-balance')
 router.register('leave-applications', LeaveApplicationViewSet)
 router.register('performance-cycles', PerformanceCycleViewSet)
 router.register('kpis', KPIViewSet)

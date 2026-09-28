@@ -5,8 +5,25 @@ from core.models import User
 
 class LeaveType(models.Model):
     name = models.CharField(max_length=50, unique=True)
+    code = models.CharField(max_length=20, unique=True, default='ANNUAL')
     max_days_per_year = models.IntegerField(default=20)
     is_paid = models.BooleanField(default=True)
+    is_mandatory_holiday = models.BooleanField(
+        default=False,
+        help_text='True for the December mandatory holiday period only',
+    )
+    holiday_start_month = models.IntegerField(
+        null=True, blank=True,
+        help_text='Month number when this type becomes available (e.g. 12 for December)',
+    )
+    holiday_end_month = models.IntegerField(
+        null=True, blank=True,
+        help_text='Month number when this type stops being available (e.g. 1 for January)',
+    )
+    description = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['name']
 
     def __str__(self):
         return self.name
@@ -46,6 +63,14 @@ class LeaveApplication(models.Model):
     reason = models.TextField()
     status = models.CharField(max_length=30, choices=STATUS, default='PENDING')
     supervisor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='supervised_leaves')
+    hod = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='hod_leaves',
+    )
+    hod_required = models.BooleanField(
+        default=False,
+        help_text='HOD approval required based on department policy',
+    )
     supervisor_approved_at = models.DateTimeField(null=True, blank=True)
     hod_approved_at = models.DateTimeField(null=True, blank=True)
     hr_approved_at = models.DateTimeField(null=True, blank=True)

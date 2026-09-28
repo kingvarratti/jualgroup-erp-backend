@@ -21,6 +21,7 @@ class LeaveBalanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeaveBalance
         fields = '__all__'
+        read_only_fields = ['id', 'balance']
 
 
 class LeaveApplicationSerializer(serializers.ModelSerializer):
@@ -30,7 +31,13 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeaveApplication
         fields = '__all__'
-        read_only_fields = ['id', 'application_no', 'status', 'created_at']
+        read_only_fields = [
+            'id', 'application_no', 'status', 'created_at',
+            'employee',           # auto-set from request.user
+            'supervisor', 'supervisor_approved_at',
+            'hod', 'hod_required', 'hod_approved_at',
+            'hr_approved_at', 'rejection_reason',
+        ]
 
 
 class KPISerializer(serializers.ModelSerializer):

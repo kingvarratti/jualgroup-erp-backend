@@ -27,7 +27,7 @@ class LeaveTypeViewSet(viewsets.ModelViewSet):
 
 
 class LeaveBalanceViewSet(viewsets.ModelViewSet):
-    queryset = LeaveBalance.objects.all()
+    queryset = LeaveBalance.objects.all().select_related('employee', 'leave_type')
     serializer_class = LeaveBalanceSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
@@ -38,13 +38,86 @@ class LeaveBalanceViewSet(viewsets.ModelViewSet):
         balances = self.get_queryset().filter(employee=request.user)
         return Response(LeaveBalanceSerializer(balances, many=True).data)
 
+    @action(detail=False, methods=['get'])
+    def my_summary(self, request):
+        """Complete leave summary for the current user."""
+        from datetime import date
+        year = int(request.GET.get('year', date.today().year))
+        user = request.user
+
+        # Auto-create balances for any leave types that don't have one yet
+        for lt in LeaveType.objects.all():
+            LeaveBalance.objects.get_or_create(
+                employee=user, leave_type=lt, year=year,
+                defaults={'entitled_days': lt.max_days_per_year, 'used_days': 0},
+            )
+
+        balances = LeaveBalance.objects.filter(
+            employee=user, year=year
+        ).select_related('leave_type')
+
+        apps = LeaveApplication.objects.filter(
+            employee=user, start_date__year=year,
+        ).order_by('-created_at')
+
+        balances_data = [
+            {
+                'id': str(b.id),
+                'leave_type': str(b.leave_type.id),
+                'leave_type_name': b.leave_type.name,
+                'leave_type_code': b.leave_type.code,
+                'is_mandatory_holiday': b.leave_type.is_mandatory_holiday,
+                'entitled_days': float(b.entitled_days),
+                'used_days': float(b.used_days),
+                'balance': float(b.balance),
+            }
+            for b in balances
+        ]
+
+        applications_data = [
+            {
+                'id': str(a.id),
+                'application_no': a.application_no,
+                'leave_type_name': a.leave_type.name,
+                'start_date': str(a.start_date),
+                'end_date': str(a.end_date),
+                'days_requested': float(a.days_requested),
+                'status': a.status,
+                'status_display': a.get_status_display(),
+                'created_at': a.created_at.isoformat(),
+                'supervisor_approved_at': a.supervisor_approved_at.isoformat() if a.supervisor_approved_at else None,
+                'hod_approved_at': a.hod_approved_at.isoformat() if a.hod_approved_at else None,
+                'hr_approved_at': a.hr_approved_at.isoformat() if a.hr_approved_at else None,
+                'rejection_reason': a.rejection_reason,
+            }
+            for a in apps
+        ]
+
+        total_entitled = sum(b['entitled_days'] for b in balances_data)
+        total_used = sum(b['used_days'] for b in balances_data)
+        total_balance = sum(b['balance'] for b in balances_data)
+
+        return Response({
+            'year': year,
+            'balances': balances_data,
+            'applications': applications_data,
+            'totals': {
+                'entitled': total_entitled,
+                'used': total_used,
+                'balance': total_balance,
+            },
+        })
+
+
+    
+
 
 class LeaveApplicationViewSet(viewsets.ModelViewSet):
     queryset = LeaveApplication.objects.all().select_related('employee', 'leave_type')
     serializer_class = LeaveApplicationSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['status', 'employee']
+    filterset_fields = ['status', 'employee', 'leave_type']
 
     def perform_create(self, serializer):
         application = serializer.save(employee=self.request.user)
@@ -55,6 +128,25 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
             rank=1,
         )
 
+    @action(detail=False, methods=['get'])
+    def pending_for_me(self, request):
+        """Applications waiting for MY approval."""
+        user = request.user
+
+        # HR sees ALL pending applications
+        if user.role == 'HR' or user.is_superuser:
+            qs = LeaveApplication.objects.filter(
+                status__in=['PENDING', 'SUPERVISOR_APPROVED', 'HOD_APPROVED'],
+            ).exclude(employee=user).select_related('employee', 'leave_type')
+            return Response(LeaveApplicationSerializer(qs, many=True).data)
+
+        # Line managers see applications from their direct reports
+        qs = LeaveApplication.objects.filter(
+            employee__line_manager=user,
+            status__in=['PENDING', 'SUPERVISOR_APPROVED'],
+        ).exclude(employee=user).select_related('employee', 'leave_type')
+        return Response(LeaveApplicationSerializer(qs, many=True).data)
+
     @action(detail=True, methods=['post'])
     def supervisor_approve(self, request, pk=None):
         app = self.get_object()
@@ -63,6 +155,17 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
         app.status = 'SUPERVISOR_APPROVED'
         app.supervisor = request.user
         app.supervisor_approved_at = timezone.now()
+        app.save()
+        return Response(LeaveApplicationSerializer(app).data)
+
+    @action(detail=True, methods=['post'])
+    def hod_approve(self, request, pk=None):
+        app = self.get_object()
+        if app.status != 'SUPERVISOR_APPROVED':
+            return Response({'error': 'Must have supervisor approval first'}, status=400)
+        app.status = 'HOD_APPROVED'
+        app.hod = request.user
+        app.hod_approved_at = timezone.now()
         app.save()
         return Response(LeaveApplicationSerializer(app).data)
 
@@ -83,6 +186,17 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
             balance.save()
         except LeaveBalance.DoesNotExist:
             pass
+        return Response(LeaveApplicationSerializer(app).data)
+
+    @action(detail=True, methods=['post'])
+    def reject_application(self, request, pk=None):
+        app = self.get_object()
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'Rejection reason required'}, status=400)
+        app.status = 'REJECTED'
+        app.rejection_reason = reason
+        app.save()
         return Response(LeaveApplicationSerializer(app).data)
 
 

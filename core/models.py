@@ -27,6 +27,14 @@ class Branch(models.Model):
     name = models.CharField(max_length=100, unique=True)
     location = models.CharField(max_length=200)
     is_active = models.BooleanField(default=True)
+    line_manager = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='direct_reports',
+        help_text='Line manager who approves leave and requests',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
