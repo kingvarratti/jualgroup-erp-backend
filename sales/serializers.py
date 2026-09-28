@@ -68,15 +68,20 @@ class FollowUpDiscussionSerializer(serializers.ModelSerializer):
 
 class EnquirySerializer(serializers.ModelSerializer):
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True)
     ga_drawings = PreliminaryGASerializer(many=True, read_only=True)
     quotations = QuotationSerializer(many=True, read_only=True)
+    requirement_type_display = serializers.CharField(
+        source='get_requirement_type_display', read_only=True
+    )
 
     class Meta:
         model = Enquiry
         fields = '__all__'
-        read_only_fields = ['id', 'reference_no', 'received_by', 'date_received', 'created_at']
-
-
+        read_only_fields = [
+            'id', 'reference_no', 'received_by', 'date_received', 'created_at',
+            'reviewed_by', 'reviewed_at',
+        ]
 class ProjectReviewSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectReview

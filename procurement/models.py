@@ -565,6 +565,7 @@ class RequisitionRequest(models.Model):
         ('PRODUCTION', 'Production'),
         ('PROJECT', 'Project'),
         ('PROCUREMENT', 'Procurement'),
+        ('SALES', 'Sales'),
         ('OTHER', 'Other'),
     )
 

@@ -7,6 +7,7 @@ from core.models import User
 class Enquiry(models.Model):
     STATUS = (
         ('RECEIVED', 'Received'),
+        ('TECH_REVIEW', 'Technical Review'),
         ('UNDER_REVIEW', 'Under Review'),
         ('QUOTING', 'Quoting'),
         ('QUOTED', 'Quoted'),
@@ -14,17 +15,57 @@ class Enquiry(models.Model):
         ('LOST', 'Lost'),
         ('CANCELLED', 'Cancelled'),
     )
+
+    REQUIREMENT_TYPE = (
+        ('PUMP', 'Pump'),
+        ('AUTOMATION', 'Automation'),
+        ('LV', 'Low Voltage (LV)'),
+        ('MV', 'Medium Voltage (MV)'),
+        ('PROJECT', 'Project'),
+        ('OTHER', 'Other'),
+    )
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference_no = models.CharField(max_length=30, unique=True, editable=False)
     client_name = models.CharField(max_length=200)
     client_contact = models.CharField(max_length=200, blank=True)
     client_email = models.EmailField(blank=True)
-    description = models.TextField()
+    client_phone = models.CharField(max_length=30, blank=True)
+    client_address = models.TextField(blank=True)
+
+    requirement_type = models.CharField(
+        max_length=20,
+        choices=REQUIREMENT_TYPE,
+        default='AUTOMATION',
+    )
+    description = models.TextField(help_text='General description of what the client needs')
+    application = models.CharField(
+        max_length=300, blank=True,
+        help_text='Where this will be used / application context',
+    )
+
+    # Pump-specific specs (only used when requirement_type == 'PUMP')
+    pump_specs = models.JSONField(
+        default=dict, blank=True,
+        help_text='Pump technical specifications (fluid, flow, head, etc.)',
+    )
+
     estimated_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     received_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='enquiries_received')
     date_received = models.DateField(auto_now_add=True)
     status = models.CharField(max_length=20, choices=STATUS, default='RECEIVED')
     notes = models.TextField(blank=True)
+        # Technical Review
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='enquiries_reviewed',
+        help_text='Design/Sales Engineer who reviewed this enquiry',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    technical_review_notes = models.TextField(
+        blank=True,
+        help_text='Notes from the technical review (clarifications, findings)',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
