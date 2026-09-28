@@ -248,3 +248,139 @@ class ProjectReview(models.Model):
 
     def __str__(self):
         return f"Review for {self.client_po.internal_order_no}"
+
+
+
+class SalesOrder(models.Model):
+    """
+    Created from a won Client PO. Tracks the 3 parallel fulfilment paths
+    (Warehouse / Fabrication / Installation) and QC stage.
+    """
+    STATUS = (
+        ('CREATED', 'Created'),
+        ('IN_FULFILMENT', 'In Fulfilment'),
+        ('QC_PENDING', 'QC Pending'),
+        ('QC_PASSED', 'QC Passed'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    FULFILMENT_PATH = (
+        ('WAREHOUSE', 'Warehouse / Dispatch Only'),
+        ('FABRICATION', 'Panel Fabrication / Production'),
+        ('INSTALLATION', 'Project / Installation'),
+        ('MIXED', 'Multiple Paths'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order_no = models.CharField(max_length=30, unique=True, editable=False)
+    client_po = models.OneToOneField(
+        ClientPO,
+        on_delete=models.CASCADE,
+        related_name='sales_order',
+    )
+    fulfilment_path = models.CharField(
+        max_length=20, choices=FULFILMENT_PATH, default='WAREHOUSE',
+    )
+    status = models.CharField(max_length=20, choices=STATUS, default='CREATED')
+
+    # Path 1: Warehouse / Dispatch
+    warehouse_dispatched = models.BooleanField(default=False)
+    warehouse_dispatched_at = models.DateTimeField(null=True, blank=True)
+
+    # Path 2: Panel Fabrication / Production
+    panel_fabricated = models.BooleanField(default=False)
+    panel_fabricated_at = models.DateTimeField(null=True, blank=True)
+
+    # Path 3: Project / Installation
+    installation_completed = models.BooleanField(default=False)
+    installation_completed_at = models.DateTimeField(null=True, blank=True)
+
+    # QC
+    qc_passed = models.BooleanField(default=False)
+    qc_passed_at = models.DateTimeField(null=True, blank=True)
+
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='sales_orders_created',
+    )
+    completed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sales_orders_completed',
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Sales Order'
+        verbose_name_plural = 'Sales Orders'
+
+    def save(self, *args, **kwargs):
+        if not self.order_no:
+            self.order_no = f"SO-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
+
+    @property
+    def progress_percent(self):
+        """% completion based on 4 milestones (dispatch/fabrication/installation + QC)."""
+        milestones = []
+        if self.fulfilment_path in ['WAREHOUSE', 'MIXED']:
+            milestones.append(self.warehouse_dispatched)
+        if self.fulfilment_path in ['FABRICATION', 'MIXED']:
+            milestones.append(self.panel_fabricated)
+        if self.fulfilment_path in ['INSTALLATION', 'MIXED']:
+            milestones.append(self.installation_completed)
+        milestones.append(self.qc_passed)
+
+        if not milestones:
+            return 0
+        return int((sum(1 for m in milestones if m) / len(milestones)) * 100)
+
+    def __str__(self):
+        return f"{self.order_no} — {self.client_po.internal_order_no}"
+
+
+class ProjectInstallation(models.Model):
+    """
+    On-site installation tracking for Sales Orders that involve project work.
+    """
+    STATUS = (
+        ('SCHEDULED', 'Scheduled'),
+        ('IN_PROGRESS', 'In Progress'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sales_order = models.ForeignKey(
+        SalesOrder, on_delete=models.CASCADE, related_name='installations',
+    )
+    site_name = models.CharField(max_length=200)
+    site_address = models.TextField()
+    site_contact = models.CharField(max_length=200, blank=True)
+    site_phone = models.CharField(max_length=30, blank=True)
+
+    scheduled_date = models.DateField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    team_lead = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='installations_led',
+    )
+    status = models.CharField(max_length=20, choices=STATUS, default='SCHEDULED')
+    notes = models.TextField(blank=True)
+    completion_notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Installation for {self.sales_order.order_no} @ {self.site_name}"

@@ -9,12 +9,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import (
     Enquiry, PreliminaryGA, Quotation, ClientPO,
-    OfferSubmission, FollowUpDiscussion, ProjectReview,
+    OfferSubmission, FollowUpDiscussion, ProjectReview, SalesOrder, ProjectInstallation
 )
 from .serializers import (
     EnquirySerializer, PreliminaryGASerializer, QuotationSerializer,
     QuotationCreateSerializer, ClientPOSerializer, ClientPOCreateSerializer,
     OfferSubmissionSerializer, FollowUpDiscussionSerializer, ProjectReviewSerializer,
+    SalesOrderSerializer, SalesOrderCreateSerializer, ProjectInstallationSerializer,
 )
 
 from core.models import ApprovalRequest, AuditLog, Role
@@ -371,3 +372,137 @@ class ProjectReviewViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+
+
+class SalesOrderViewSet(viewsets.ModelViewSet):
+    queryset = SalesOrder.objects.all().select_related(
+        'client_po', 'created_by', 'completed_by',
+    ).prefetch_related('installations')
+    serializer_class = SalesOrderSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'fulfilment_path', 'client_po']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return SalesOrderCreateSerializer
+        return SalesOrderSerializer
+
+    def perform_create(self, serializer):
+        so = serializer.save(created_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user, action='CREATE', module='SALES_ORDER',
+            reference_id=so.order_no,
+        )
+
+    @action(detail=True, methods=['post'])
+    def mark_dispatched(self, request, pk=None):
+        """Mark warehouse/dispatch path complete."""
+        from django.utils import timezone
+        so = self.get_object()
+        so.warehouse_dispatched = True
+        so.warehouse_dispatched_at = timezone.now()
+        if so.status == 'CREATED':
+            so.status = 'IN_FULFILMENT'
+        so.save()
+        return Response(SalesOrderSerializer(so).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_fabricated(self, request, pk=None):
+        """Mark panel fabrication/production path complete."""
+        from django.utils import timezone
+        so = self.get_object()
+        so.panel_fabricated = True
+        so.panel_fabricated_at = timezone.now()
+        if so.status == 'CREATED':
+            so.status = 'IN_FULFILMENT'
+        so.save()
+        return Response(SalesOrderSerializer(so).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_installed(self, request, pk=None):
+        """Mark project/installation path complete."""
+        from django.utils import timezone
+        so = self.get_object()
+        so.installation_completed = True
+        so.installation_completed_at = timezone.now()
+        if so.status == 'CREATED':
+            so.status = 'IN_FULFILMENT'
+        so.save()
+        return Response(SalesOrderSerializer(so).data)
+
+    @action(detail=True, methods=['post'])
+    def mark_qc_passed(self, request, pk=None):
+        """QC inspection passed."""
+        from django.utils import timezone
+        so = self.get_object()
+        so.qc_passed = True
+        so.qc_passed_at = timezone.now()
+        so.status = 'QC_PASSED'
+        so.save()
+        return Response(SalesOrderSerializer(so).data)
+
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        """Mark the order fully complete."""
+        from django.utils import timezone
+        so = self.get_object()
+        if not so.qc_passed:
+            return Response({'error': 'QC must pass before completing'}, status=400)
+        so.status = 'COMPLETED'
+        so.completed_by = request.user
+        so.completed_at = timezone.now()
+        so.save()
+        return Response(SalesOrderSerializer(so).data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        qs = SalesOrder.objects.all()
+        return Response({
+            'created': qs.filter(status='CREATED').count(),
+            'in_fulfilment': qs.filter(status='IN_FULFILMENT').count(),
+            'qc_pending': qs.filter(status='QC_PENDING').count(),
+            'qc_passed': qs.filter(status='QC_PASSED').count(),
+            'completed': qs.filter(status='COMPLETED').count(),
+            'total': qs.count(),
+        })
+
+
+class ProjectInstallationViewSet(viewsets.ModelViewSet):
+    queryset = ProjectInstallation.objects.all().select_related(
+        'sales_order', 'team_lead',
+    )
+    serializer_class = ProjectInstallationSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['sales_order', 'status']
+
+    @action(detail=True, methods=['post'])
+    def start(self, request, pk=None):
+        from django.utils import timezone
+        inst = self.get_object()
+        inst.status = 'IN_PROGRESS'
+        inst.started_at = timezone.now()
+        if request.data.get('team_lead'):
+            inst.team_lead_id = request.data['team_lead']
+        inst.save()
+        return Response(ProjectInstallationSerializer(inst).data)
+
+    @action(detail=True, methods=['post'])
+    def finish(self, request, pk=None):
+        from django.utils import timezone
+        inst = self.get_object()
+        inst.status = 'COMPLETED'
+        inst.completed_at = timezone.now()
+        inst.completion_notes = request.data.get('completion_notes', '')
+        inst.save()
+
+        # If this was the last installation, mark the SO's installation path complete
+        so = inst.sales_order
+        if all(i.status == 'COMPLETED' for i in so.installations.all()):
+            so.installation_completed = True
+            so.installation_completed_at = timezone.now()
+            so.save()
+
+        return Response(ProjectInstallationSerializer(inst).data)

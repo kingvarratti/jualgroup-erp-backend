@@ -2,8 +2,8 @@ from rest_framework import serializers
 from .models import (
     Enquiry, PreliminaryGA, Quotation, QuotationLineItem,
     OfferSubmission, FollowUpDiscussion, ClientPO, ClientPOItem, ProjectReview,
+    SalesOrder, ProjectInstallation,
 )
-
 
 class PreliminaryGASerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.CharField(source='uploaded_by.get_full_name', read_only=True)
@@ -147,3 +147,59 @@ class ClientPOCreateSerializer(serializers.ModelSerializer):
                 item.pop('client_po', None)
                 ClientPOItem.objects.create(client_po=instance, **item)
         return instance
+
+
+
+
+class ProjectInstallationSerializer(serializers.ModelSerializer):
+    team_lead_name = serializers.CharField(source='team_lead.get_full_name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = ProjectInstallation
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'started_at', 'completed_at', 'created_at', 'updated_at',
+        ]
+
+
+class SalesOrderSerializer(serializers.ModelSerializer):
+    client_po_no = serializers.CharField(source='client_po.internal_order_no', read_only=True)
+    client_po_number = serializers.CharField(source='client_po.client_po_number', read_only=True)
+    total_value = serializers.DecimalField(
+        source='client_po.total_value', max_digits=14, decimal_places=2, read_only=True,
+    )
+    client_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    path_display = serializers.CharField(source='get_fulfilment_path_display', read_only=True)
+    progress_percent = serializers.IntegerField(read_only=True)
+    installations = ProjectInstallationSerializer(many=True, read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = SalesOrder
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'order_no', 'status',
+            'warehouse_dispatched', 'warehouse_dispatched_at',
+            'panel_fabricated', 'panel_fabricated_at',
+            'installation_completed', 'installation_completed_at',
+            'qc_passed', 'qc_passed_at',
+            'created_by', 'completed_by', 'completed_at',
+            'created_at', 'updated_at',
+        ]
+
+    def get_client_name(self, obj):
+        try:
+            q = obj.client_po.quotation
+            if q and q.enquiry:
+                return q.enquiry.client_name
+        except Exception:
+            pass
+        return '—'
+
+
+class SalesOrderCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SalesOrder
+        fields = ['id', 'client_po', 'fulfilment_path', 'notes']
