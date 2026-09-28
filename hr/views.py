@@ -204,25 +204,282 @@ class LeaveApplicationViewSet(viewsets.ModelViewSet):
 
 
 class PerformanceCycleViewSet(viewsets.ModelViewSet):
-    queryset = PerformanceCycle.objects.all()
+    queryset = PerformanceCycle.objects.all().prefetch_related('kpis', 'appraisals')
     serializer_class = PerformanceCycleSerializer
     permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status']
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        cycle = self.get_object()
+        if cycle.status != 'DRAFT':
+            return Response(
+                {'error': f'Only DRAFT cycles can be activated. Current status: {cycle.status}'},
+                status=400,
+            )
+
+        created = 0
+        for user in User.objects.filter(is_active=True, is_active_employee=True):
+            _, was_created = PerformanceAppraisal.objects.get_or_create(
+                cycle=cycle,
+                employee=user,
+                defaults={
+                    'supervisor': user.line_manager,
+                    'status': 'NOT_STARTED',
+                },
+            )
+            if was_created:
+                created += 1
+
+        cycle.status = 'ACTIVE'
+        cycle.save()
+
+        return Response({
+            'cycle': PerformanceCycleSerializer(cycle).data,
+            'appraisals_created': created,
+        })
+
+    @action(detail=True, methods=['post'])
+    def start_mid_year(self, request, pk=None):
+        cycle = self.get_object()
+        if cycle.status != 'ACTIVE':
+            return Response({'error': 'Cycle must be ACTIVE first'}, status=400)
+        cycle.status = 'MID_YEAR'
+        cycle.save()
+        return Response(PerformanceCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def start_end_year(self, request, pk=None):
+        cycle = self.get_object()
+        if cycle.status not in ['ACTIVE', 'MID_YEAR']:
+            return Response({'error': 'Cycle must be ACTIVE or MID_YEAR'}, status=400)
+        cycle.status = 'END_YEAR'
+        cycle.save()
+        return Response(PerformanceCycleSerializer(cycle).data)
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        cycle = self.get_object()
+        cycle.status = 'CLOSED'
+        cycle.save()
+        return Response(PerformanceCycleSerializer(cycle).data)
 
 
 class KPIViewSet(viewsets.ModelViewSet):
-    queryset = KPI.objects.all()
+    queryset = KPI.objects.all().select_related('cycle', 'employee')
     serializer_class = KPISerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['cycle', 'employee']
 
+    def _is_hr(self, user):
+        return user.is_superuser or user.role in ('HR', 'ADMIN')
+
+    def _is_supervisor_of(self, user, employee):
+        appraisal = PerformanceAppraisal.objects.filter(
+            employee=employee, supervisor=user,
+        ).exists()
+        return appraisal
+
+    @action(detail=True, methods=['post'])
+    def rate_self(self, request, pk=None):
+        kpi = self.get_object()
+        if request.user != kpi.employee and not self._is_hr(request.user):
+            return Response({'error': 'Only the employee can rate this KPI'}, status=403)
+        rating = request.data.get('rating')
+        if not isinstance(rating, int) or not 1 <= rating <= 5:
+            return Response({'error': 'rating must be an integer 1-5'}, status=400)
+        kpi.self_rating = rating
+        kpi.self_comment = request.data.get('comment', kpi.self_comment)
+        kpi.save(update_fields=['self_rating', 'self_comment', 'updated_at'])
+        return Response(KPISerializer(kpi).data)
+
+    @action(detail=True, methods=['post'])
+    def rate_supervisor(self, request, pk=None):
+        kpi = self.get_object()
+        allowed = (
+            self._is_hr(request.user)
+            or self._is_supervisor_of(request.user, kpi.employee)
+        )
+        if not allowed:
+            return Response({'error': 'Only the supervisor or HR can rate this KPI'}, status=403)
+        rating = request.data.get('rating')
+        if not isinstance(rating, int) or not 1 <= rating <= 5:
+            return Response({'error': 'rating must be an integer 1-5'}, status=400)
+        kpi.supervisor_rating = rating
+        kpi.supervisor_comment = request.data.get('comment', kpi.supervisor_comment)
+        kpi.save(update_fields=['supervisor_rating', 'supervisor_comment', 'updated_at'])
+        return Response(KPISerializer(kpi).data)
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        """Create the same KPI across many employees in one shot."""
+        cycle_id = request.data.get('cycle')
+        employee_ids = request.data.get('employees') or []
+        title = request.data.get('title')
+        if not (cycle_id and employee_ids and title):
+            return Response({'error': 'cycle, employees, and title are required'}, status=400)
+        defaults = {
+            'target': request.data.get('target', ''),
+            'description': request.data.get('description', ''),
+            'weight': request.data.get('weight', 0),
+        }
+        created = 0
+        for uid in employee_ids:
+            _, was_created = KPI.objects.get_or_create(
+                cycle_id=cycle_id, employee_id=uid, title=title,
+                defaults=defaults,
+            )
+            if was_created:
+                created += 1
+        return Response({'created': created, 'requested': len(employee_ids)})
+
 
 class PerformanceAppraisalViewSet(viewsets.ModelViewSet):
-    queryset = PerformanceAppraisal.objects.all()
+    queryset = (
+        PerformanceAppraisal.objects
+        .all()
+        .select_related('employee', 'supervisor', 'cycle')
+    )
     serializer_class = PerformanceAppraisalSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['cycle', 'employee', 'status']
+
+    # ---- permission helpers ----
+    def _is_hr(self, user):
+        return user.is_superuser or user.role in ('HR', 'ADMIN')
+
+    def _is_employee(self, user, appraisal):
+        return user == appraisal.employee
+
+    def _is_supervisor(self, user, appraisal):
+        return appraisal.supervisor_id == user.id
+
+    # ---- workflow ----
+
+    @action(detail=True, methods=['post'])
+    def start_self_assessment(self, request, pk=None):
+        """NOT_STARTED -> SELF_ASSESSMENT"""
+        a = self.get_object()
+        if a.status != 'NOT_STARTED':
+            return Response({'error': f'Cannot start from status {a.status}'}, status=400)
+        if not (self._is_employee(request.user, a) or self._is_hr(request.user)):
+            return Response({'error': 'Only the employee or HR can start'}, status=403)
+        a.status = 'SELF_ASSESSMENT'
+        a.save(update_fields=['status', 'updated_at'])
+        return Response(PerformanceAppraisalSerializer(a).data)
+
+    @action(detail=True, methods=['post'])
+    def submit_self_assessment(self, request, pk=None):
+        """SELF_ASSESSMENT -> SUPERVISOR_REVIEW"""
+        a = self.get_object()
+        if a.status != 'SELF_ASSESSMENT':
+            return Response({'error': f'Cannot submit from status {a.status}'}, status=400)
+        if not (self._is_employee(request.user, a) or self._is_hr(request.user)):
+            return Response({'error': 'Only the employee or HR can submit'}, status=403)
+
+        # Require every KPI be self-rated
+        unrated = a.cycle.kpis.filter(employee=a.employee, self_rating__isnull=True)
+        if unrated.exists():
+            return Response({
+                'error': 'All KPIs must be self-rated before submitting',
+                'unrated_kpi_ids': [str(k.id) for k in unrated],
+            }, status=400)
+
+        a.status = 'SUPERVISOR_REVIEW'
+        a.self_submitted_at = timezone.now()
+        a.save(update_fields=['status', 'self_submitted_at', 'updated_at'])
+        return Response(PerformanceAppraisalSerializer(a).data)
+
+    @action(detail=True, methods=['post'])
+    def submit_supervisor_review(self, request, pk=None):
+        """SUPERVISOR_REVIEW -> EXECUTIVE_AUTH"""
+        a = self.get_object()
+        if a.status != 'SUPERVISOR_REVIEW':
+            return Response({'error': f'Cannot submit from status {a.status}'}, status=400)
+        if not (self._is_supervisor(request.user, a) or self._is_hr(request.user)):
+            return Response({'error': 'Only the supervisor or HR can submit'}, status=403)
+
+        # Require every KPI be supervisor-rated
+        unrated = a.cycle.kpis.filter(employee=a.employee, supervisor_rating__isnull=True)
+        if unrated.exists():
+            return Response({
+                'error': 'All KPIs must be supervisor-rated before submitting',
+                'unrated_kpi_ids': [str(k.id) for k in unrated],
+            }, status=400)
+
+        # Persist interim score so it shows up live
+        a.overall_rating = a.calculate_overall()
+        a.status = 'EXECUTIVE_AUTH'
+        a.supervisor_submitted_at = timezone.now()
+        a.save(update_fields=[
+            'status', 'supervisor_submitted_at', 'overall_rating', 'updated_at',
+        ])
+        return Response(PerformanceAppraisalSerializer(a).data)
+
+    @action(detail=True, methods=['post'])
+    def approve_executive(self, request, pk=None):
+        """EXECUTIVE_AUTH -> COMPLETED (final score computed here)."""
+        a = self.get_object()
+        if a.status != 'EXECUTIVE_AUTH':
+            return Response({'error': f'Cannot approve from status {a.status}'}, status=400)
+        if not self._is_hr(request.user):
+            return Response({'error': 'Only HR or executives can approve'}, status=403)
+        a.status = 'COMPLETED'
+        a.executive_approved_at = timezone.now()
+        a.completed_at = timezone.now()
+        a.save()  # full save -> model computes and persists overall_rating
+        return Response(PerformanceAppraisalSerializer(a).data)
+
+    @action(detail=True, methods=['post'])
+    def reopen(self, request, pk=None):
+        """HR-only: reset a completed appraisal back to NOT_STARTED."""
+        a = self.get_object()
+        if not self._is_hr(request.user):
+            return Response({'error': 'Only HR can reopen'}, status=403)
+        a.status = 'NOT_STARTED'
+        a.overall_rating = None
+        a.self_submitted_at = None
+        a.supervisor_submitted_at = None
+        a.executive_approved_at = None
+        a.completed_at = None
+        a.save()
+        return Response(PerformanceAppraisalSerializer(a).data)
+
+    # ---- convenience ----
+
+    @action(detail=False, methods=['get'])
+    def my_appraisals(self, request):
+        qs = self.get_queryset().filter(employee=request.user)
+        return Response(PerformanceAppraisalSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def awaiting_my_review(self, request):
+        """Appraisals where I'm the supervisor and it's my turn."""
+        qs = self.get_queryset().filter(
+            supervisor=request.user, status='SUPERVISOR_REVIEW',
+        )
+        return Response(PerformanceAppraisalSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=['post'])
+    def complete_all(self, request):
+        """DEV ONLY — force-complete every appraisal in a cycle."""
+        cycle_id = request.data.get('cycle')
+        if not self._is_hr(request.user):
+            return Response({'error': 'Only HR'}, status=403)
+        qs = PerformanceAppraisal.objects.filter(cycle_id=cycle_id)
+        count = 0
+        for a in qs:
+            a.status = 'COMPLETED'
+            a.completed_at = timezone.now()
+            a.save()
+            count += 1
+        return Response({'completed': count})
 
 
 class PayrollCycleViewSet(viewsets.ModelViewSet):

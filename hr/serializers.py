@@ -41,9 +41,18 @@ class LeaveApplicationSerializer(serializers.ModelSerializer):
 
 
 class KPISerializer(serializers.ModelSerializer):
+    employee_name = serializers.SerializerMethodField()
+    employee_id = serializers.CharField(source='employee.employee_id', read_only=True)
+    employee_department = serializers.CharField(source='employee.department', read_only=True)
+    cycle_name = serializers.CharField(source='cycle.name', read_only=True)
+
     class Meta:
         model = KPI
         fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_employee_name(self, obj):
+        return obj.employee.get_full_name() or obj.employee.username
 
 
 class PerformanceCycleSerializer(serializers.ModelSerializer):
@@ -53,14 +62,35 @@ class PerformanceCycleSerializer(serializers.ModelSerializer):
 
 
 class PerformanceAppraisalSerializer(serializers.ModelSerializer):
-    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_name = serializers.SerializerMethodField()
+    employee_id = serializers.CharField(source='employee.employee_id', read_only=True)
+    employee_department = serializers.CharField(source='employee.department', read_only=True)
+    supervisor_name = serializers.SerializerMethodField()
+    supervisor_id = serializers.CharField(source='supervisor.employee_id', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    kpis = serializers.SerializerMethodField()
 
     class Meta:
         model = PerformanceAppraisal
         fields = '__all__'
-        read_only_fields = ['created_at', 'completed_at']
+        read_only_fields = [
+            'id', 'created_at', 'updated_at',
+            'self_submitted_at', 'supervisor_submitted_at',
+            'executive_approved_at', 'completed_at',
+            'overall_rating',
+        ]
 
+    def get_employee_name(self, obj):
+        return obj.employee.get_full_name() or obj.employee.username
 
+    def get_supervisor_name(self, obj):
+        if not obj.supervisor:
+            return None
+        return obj.supervisor.get_full_name() or obj.supervisor.username
+
+    def get_kpis(self, obj):
+        kpis = obj.cycle.kpis.filter(employee=obj.employee)
+        return KPISerializer(kpis, many=True).data
 class PayslipSerializer(serializers.ModelSerializer):
     employee_name = serializers.SerializerMethodField()
     employee_id = serializers.CharField(source='employee.employee_id', read_only=True)

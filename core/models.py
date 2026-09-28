@@ -55,6 +55,16 @@ class User(AbstractUser):
     hire_date = models.DateField(null=True, blank=True)
     is_active_employee = models.BooleanField(default=True)
 
+    # 👇 NEW — immediate supervisor / line manager
+    line_manager = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='direct_reports',
+        help_text='Immediate supervisor / line manager',
+    )
+
     def save(self, *args, **kwargs):
         if not self.employee_id:
             self.employee_id = f"EMP-{uuid.uuid4().hex[:6].upper()}"

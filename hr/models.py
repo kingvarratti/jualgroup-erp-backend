@@ -88,46 +88,130 @@ class LeaveApplication(models.Model):
 
 
 class PerformanceCycle(models.Model):
+    STATUS = (
+        ('DRAFT', 'Draft'),
+        ('ACTIVE', 'Active — KPIs Set'),
+        ('MID_YEAR', 'Mid-Year Review'),
+        ('END_YEAR', 'End-of-Year Assessment'),
+        ('CLOSED', 'Closed'),
+    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
     start_date = models.DateField()
+    mid_year_date = models.DateField(null=True, blank=True)
     end_date = models.DateField()
-    is_active = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=STATUS, default='DRAFT')
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cycles_created',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-start_date']
 
     def __str__(self):
         return self.name
 
 
 class KPI(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     cycle = models.ForeignKey(PerformanceCycle, on_delete=models.CASCADE, related_name='kpis')
     employee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='kpis')
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    weight = models.DecimalField(max_digits=5, decimal_places=2, default=10)
-    target = models.CharField(max_length=200, blank=True)
-    self_rating = models.IntegerField(null=True, blank=True)
-    supervisor_rating = models.IntegerField(null=True, blank=True)
-    final_rating = models.IntegerField(null=True, blank=True)
+    weight = models.DecimalField(
+        max_digits=5, decimal_places=2, default=10,
+        help_text='Weight % (all KPIs for an employee should total 100)',
+    )
+    target = models.CharField(max_length=300, blank=True)
+    self_rating = models.IntegerField(
+        null=True, blank=True,
+        choices=[(i, str(i)) for i in range(1, 6)],
+    )
+    supervisor_rating = models.IntegerField(
+        null=True, blank=True,
+        choices=[(i, str(i)) for i in range(1, 6)],
+    )
+    final_rating = models.IntegerField(
+        null=True, blank=True,
+        choices=[(i, str(i)) for i in range(1, 6)],
+    )
+    self_comment = models.TextField(blank=True)
+    supervisor_comment = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-weight', 'title']
+
+    def __str__(self):
+        return f"{self.title} ({self.employee.username})"
 
 
 class PerformanceAppraisal(models.Model):
     STATUS = (
-        ('SELF_ASSESSMENT', 'Self-Assessment'),
+        ('NOT_STARTED', 'Not Started'),
+        ('SELF_ASSESSMENT', 'Self-Assessment in Progress'),
         ('SUPERVISOR_REVIEW', 'Supervisor Review'),
         ('EXECUTIVE_AUTH', 'Executive Authorization'),
         ('COMPLETED', 'Completed'),
     )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     cycle = models.ForeignKey(PerformanceCycle, on_delete=models.CASCADE, related_name='appraisals')
     employee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='appraisals')
-    supervisor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='appraisals_supervised')
-    status = models.CharField(max_length=30, choices=STATUS, default='SELF_ASSESSMENT')
+    supervisor = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='appraisals_supervised',
+    )
+    status = models.CharField(max_length=30, choices=STATUS, default='NOT_STARTED')
+
     self_comments = models.TextField(blank=True)
     supervisor_comments = models.TextField(blank=True)
     executive_comments = models.TextField(blank=True)
-    overall_rating = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    development_needs = models.TextField(blank=True)
+    feedback_given = models.TextField(blank=True)
+
+    overall_rating = models.DecimalField(
+        max_digits=4, decimal_places=2, null=True, blank=True,
+    )
+
+    self_submitted_at = models.DateTimeField(null=True, blank=True)
+    supervisor_submitted_at = models.DateTimeField(null=True, blank=True)
+    executive_approved_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('cycle', 'employee')
+        ordering = ['-created_at']
+
+    def calculate_overall(self):
+        """Weighted average of KPI supervisor ratings."""
+        kpis = self.cycle.kpis.filter(employee=self.employee)
+        total_weight = sum(float(k.weight) for k in kpis)
+        if total_weight == 0:
+            return None
+        weighted_sum = sum(
+            float(k.weight) * float(k.supervisor_rating or k.self_rating or 0)
+            for k in kpis
+        )
+        return round(weighted_sum / total_weight, 2)
+
+    def save(self, *args, **kwargs):
+     if self.status == 'COMPLETED':
+        self.overall_rating = self.calculate_overall()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'overall_rating' not in update_fields:
+            kwargs['update_fields'] = list(update_fields) + ['overall_rating']
+     super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.employee.username} - {self.cycle.name}"
 
 
 class PayrollCycle(models.Model):
@@ -380,13 +464,6 @@ class ExitClearance(models.Model):
         return f"{self.exit_process.process_no} - {self.get_department_display()}"
 
 
-class ExitClearance(models.Model):
-    exit_process = models.ForeignKey(ExitProcess, on_delete=models.CASCADE, related_name='clearances')
-    department = models.CharField(max_length=100)
-    cleared_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    is_cleared = models.BooleanField(default=False)
-    remarks = models.TextField(blank=True)
-    cleared_at = models.DateTimeField(null=True, blank=True)
 
 
 class ExitInterview(models.Model):

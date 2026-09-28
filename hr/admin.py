@@ -27,7 +27,8 @@ class LeaveApplicationAdmin(admin.ModelAdmin):
 
 @admin.register(PerformanceCycle)
 class PerformanceCycleAdmin(admin.ModelAdmin):
-    list_display = ('name', 'start_date', 'end_date', 'is_active')
+    list_display = ('name', 'start_date', 'mid_year_date', 'end_date', 'status')
+    list_filter = ('status',)
 
 
 @admin.register(KPI)
