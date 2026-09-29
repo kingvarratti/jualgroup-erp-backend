@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
+from core.permissions import IsSales, IsFinance, IsStoresReadOnly
 
 from .models import (
     Enquiry, PreliminaryGA, Quotation, ClientPO,
@@ -327,8 +328,10 @@ class FollowUpDiscussionViewSet(viewsets.ModelViewSet):
 
 
 class ClientPOViewSet(viewsets.ModelViewSet):
-    queryset = ClientPO.objects.all().select_related('quotation', 'acknowledged_by').prefetch_related('project_reviews', 'items')
-    permission_classes = [IsAuthenticated, IsSales]
+    queryset = ClientPO.objects.all().select_related(
+        'quotation', 'acknowledged_by'
+    ).prefetch_related('project_reviews', 'items')
+    permission_classes = [IsAuthenticated, IsSales | IsStoresReadOnly]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status']
 
@@ -338,7 +341,7 @@ class ClientPOViewSet(viewsets.ModelViewSet):
         return ClientPOSerializer
 
     def perform_create(self, serializer):
-        instance = serializer.save()
+        instance = serializer.save(acknowledged_by=self.request.user)
         AuditLog.objects.create(
             user=self.request.user, action='CREATE', module='CLIENT_PO',
             reference_id=instance.internal_order_no,
@@ -355,13 +358,6 @@ class ClientPOViewSet(viewsets.ModelViewSet):
             as_attachment=True,
             filename=f"{po.internal_order_no}.pdf",
             content_type='application/pdf',
-        )
-
-    def perform_create(self, serializer):
-        instance = serializer.save(acknowledged_by=self.request.user)
-        AuditLog.objects.create(
-            user=self.request.user, action='CREATE', module='CLIENT_PO',
-            reference_id=instance.internal_order_no,
         )
 
 

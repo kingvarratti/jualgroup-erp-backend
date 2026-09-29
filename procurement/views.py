@@ -1,3 +1,7 @@
+import uuid
+from decimal import Decimal
+from rest_framework import viewsets, status
+# ... rest of your imports unchanged
 from decimal import Decimal
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -16,7 +20,10 @@ from .models import (
     GoodsReceivedNote, GRNItem,
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
-    StockTransferRequest, StockTransferItem,InternalMovement, CannibalizationRequest, CannibalizationItem,
+    StockTransferRequest, StockTransferItem, InternalMovement,
+    CannibalizationRequest, CannibalizationItem,
+    ItemCategory, ItemAlias, SupplierItem, StockMovement,
+    ClientPO,
 )
 
 from .serializers import (
@@ -27,14 +34,70 @@ from .serializers import (
     GoodsReceivedNoteSerializer, GRNCreateSerializer, SupplierPaymentSerializer,
     WarehouseMovementSerializer, EnquirySourcingSerializer,
     RequisitionRequestSerializer, RequisitionRequestCreateSerializer,
-    RequisitionItemSerializer,    StockTransferRequestSerializer, StockTransferRequestCreateSerializer,
-    StockTransferItemSerializer, InternalMovementSerializer,     InternalMovementSerializer,
+    RequisitionItemSerializer, StockTransferRequestSerializer,
+    StockTransferRequestCreateSerializer, StockTransferItemSerializer,
+    InternalMovementSerializer,
     CannibalizationRequestSerializer, CannibalizationRequestCreateSerializer,
     CannibalizationItemSerializer,
+    ItemCategorySerializer, ItemCategoryFlatSerializer,
+    ItemAliasSerializer, SupplierItemSerializer,
+    StockMovementSerializer, BulkItemCreateSerializer,
 )
-from core.models import ApprovalRequest, AuditLog, Role
+from core.models import ApprovalRequest, AuditLog, Role, Branch
 from sales.models import Enquiry
-from core.permissions import IsStores, IsSupplyChain, IsFinance
+from core.permissions import IsStores, IsSupplyChain, IsFinance, IsStoresReadOnly
+
+# =========================================================================
+# Stock movement helper — single source of truth for IN/OUT operations
+# =========================================================================
+
+def _apply_stock_movement(
+    *, item, branch, direction, movement_type, quantity,
+    unit_cost=0, counterparty_type='NONE',
+    supplier=None, client_po=None, purchase_order=None, grn=None,
+    reference='', reason='', notes='', performed_by=None,
+):
+    """Create a StockMovement and update BranchStock + InventoryItem totals."""
+    qty = Decimal(str(quantity or 0))
+    cost = Decimal(str(unit_cost or 0))
+
+    movement = StockMovement.objects.create(
+        item=item, branch=branch,
+        direction=direction, movement_type=movement_type,
+        counterparty_type=counterparty_type,
+        supplier=supplier, client_po=client_po,
+        purchase_order=purchase_order, grn=grn,
+        quantity=qty, unit_cost=cost,
+        reference=reference, reason=reason, notes=notes,
+        performed_by=performed_by,
+    )
+
+    bs, _ = BranchStock.objects.get_or_create(item=item, branch=branch)
+
+    if direction == 'IN':
+        bs.quantity_on_hand = (bs.quantity_on_hand or 0) + qty
+        if movement_type == 'RECEIPT':
+            bs.qty_received = (bs.qty_received or 0) + qty
+        elif movement_type in ('CLIENT_RETURN', 'REJECTION_SALE'):
+            bs.qty_returned = (bs.qty_returned or 0) + qty
+
+    elif direction == 'OUT':
+        bs.quantity_on_hand = (bs.quantity_on_hand or 0) - qty
+        if movement_type in ('ISSUE', 'SALE'):
+            bs.qty_issued = (bs.qty_issued or 0) + qty
+        elif movement_type == 'SUPPLIER_RETURN':
+            bs.qty_returned = (bs.qty_returned or 0) + qty
+        elif movement_type == 'REJECTION_PURCHASE':
+            bs.qty_rejected = (bs.qty_rejected or 0) + qty
+
+    bs.save()
+
+    total = sum((b.quantity_on_hand or 0) for b in BranchStock.objects.filter(item=item))
+    item.quantity_on_hand = total
+    item.save(update_fields=['quantity_on_hand', 'updated_at'])
+
+    return movement
+
 
 
 class InventoryItemViewSet(viewsets.ModelViewSet):
@@ -384,7 +447,233 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
         item = self.get_object()
         qs = WarehouseMovement.objects.filter(item=item).order_by('-timestamp')[:50]
         return Response(WarehouseMovementSerializer(qs, many=True).data)
-    
+
+
+
+
+        # -------- Bulk create (multiple items, one supplier) --------
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    @transaction.atomic
+    def bulk_create(self, request):
+        ser = BulkItemCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+
+        supplier = Supplier.objects.filter(id=data['supplier']).first() if data.get('supplier') else None
+        branch = Branch.objects.filter(id=data['branch']).first() if data.get('branch') else None
+
+        created, errors = [], []
+        for idx, row in enumerate(data['items']):
+            pn = (row.get('part_number') or '').strip()
+            if InventoryItem.objects.filter(part_number=pn).exists():
+                errors.append({'row': idx + 1, 'part_number': pn, 'error': 'Already exists'})
+                continue
+            try:
+                item = InventoryItem.objects.create(
+                    part_number=pn,
+                    description=row.get('description', ''),
+                    manufacturer=row.get('manufacturer', ''),
+                    uom=row.get('uom', 'pcs'),
+                    unit_cost=row.get('unit_cost', 0) or 0,
+                    unit_price=row.get('unit_price', 0) or 0,
+                    reorder_level=row.get('reorder_level', 0) or 0,
+                    safety_stock=row.get('safety_stock', 0) or 0,
+                    location=row.get('location', ''),
+                    bin_number=row.get('bin_number', ''),
+                    notes=row.get('notes', ''),
+                    preferred_supplier=supplier,
+                    item_category_id=row.get('item_category') or None,
+                )
+                if supplier:
+                    SupplierItem.objects.get_or_create(
+                        supplier=supplier, item=item,
+                        defaults={
+                            'supplier_part_number': row.get('supplier_part_number', ''),
+                            'last_unit_price': item.unit_cost,
+                            'lead_time_days': row.get('lead_time_days', 0) or 0,
+                            'is_preferred': True,
+                        },
+                    )
+                if branch:
+                    BranchStock.objects.get_or_create(item=item, branch=branch)
+                created.append({'id': str(item.id), 'part_number': item.part_number})
+            except Exception as e:
+                errors.append({'row': idx + 1, 'part_number': pn, 'error': str(e)})
+
+        return Response({
+            'created': created, 'created_count': len(created),
+            'errors': errors, 'error_count': len(errors),
+        }, status=201 if created else 400)
+
+    # -------- Lookup helpers --------
+    def _branch(self, request):
+        bid = request.data.get('branch')
+        return Branch.objects.filter(id=bid).first() if bid else None
+
+    def _supplier(self, request):
+        sid = request.data.get('supplier')
+        return Supplier.objects.filter(id=sid).first() if sid else None
+
+    def _po(self, request):
+        pid = request.data.get('purchase_order')
+        return PurchaseOrder.objects.filter(id=pid).first() if pid else None
+
+    def _grn(self, request):
+        gid = request.data.get('grn')
+        return GoodsReceivedNote.objects.filter(id=gid).first() if gid else None
+
+    def _client_po(self, request):
+        cid = request.data.get('client_po')
+        return ClientPO.objects.filter(id=cid).first() if cid else None
+
+    # -------- Stock movement endpoints --------
+    @action(detail=True, methods=['post'], url_path='receive')
+    def receive(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='IN', movement_type='RECEIPT',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=request.data.get('unit_cost', item.unit_cost),
+            counterparty_type='SUPPLIER',
+            supplier=self._supplier(request),
+            purchase_order=self._po(request),
+            grn=self._grn(request),
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='issue')
+    def issue(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='OUT', movement_type='ISSUE',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='INTERNAL',
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='client-return')
+    def client_return(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='IN', movement_type='CLIENT_RETURN',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='CLIENT',
+            client_po=self._client_po(request),
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='return-to-supplier')
+    def return_to_supplier(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='OUT', movement_type='SUPPLIER_RETURN',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='SUPPLIER',
+            supplier=self._supplier(request),
+            purchase_order=self._po(request),
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='reject-purchase')
+    def reject_purchase(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='OUT', movement_type='REJECTION_PURCHASE',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='SUPPLIER',
+            supplier=self._supplier(request),
+            purchase_order=self._po(request),
+            grn=self._grn(request),
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='reject-sale')
+    def reject_sale(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='IN', movement_type='REJECTION_SALE',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='CLIENT',
+            client_po=self._client_po(request),
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=True, methods=['post'], url_path='internal-move')
+    def internal_move(self, request, pk=None):
+        item = self.get_object(); branch = self._branch(request)
+        if not branch: return Response({'error': 'branch is required'}, status=400)
+        m = _apply_stock_movement(
+            item=item, branch=branch,
+            direction='INTERNAL', movement_type='ADJUSTMENT',
+            quantity=request.data.get('quantity', 0),
+            unit_cost=item.unit_cost, counterparty_type='INTERNAL',
+            reference=request.data.get('reference', ''),
+            reason=request.data.get('reason', ''),
+            notes=request.data.get('notes', ''),
+            performed_by=request.user,
+        )
+        return Response(StockMovementSerializer(m).data, status=201)
+
+    @action(detail=False, methods=['get'], url_path='stock-report-pdf')
+    def stock_report_pdf(self, request):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_stock_report_pdf
+
+        branch_id = request.query_params.get('branch')
+        category = request.query_params.get('category')
+
+        branch = None
+        if branch_id:
+            branch = Branch.objects.filter(id=branch_id).first()
+
+        buffer = generate_stock_report_pdf(branch=branch, category=category)
+        filename = 'stock-report.pdf'
+        if branch:
+            filename = f'stock-report-{branch.name.lower().replace(" ", "-")}.pdf'
+
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=filename,
+            content_type='application/pdf',
+        )
+
 
 
 class StockRequisitionViewSet(viewsets.ModelViewSet):
@@ -573,8 +862,33 @@ class SupplierQuoteViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    queryset = PurchaseOrder.objects.all().select_related('supplier', 'client_po').prefetch_related('items')
-    permission_classes = [IsAuthenticated, IsSupplyChain]
+    queryset = (
+        PurchaseOrder.objects.all()
+        .select_related('supplier', 'client_po')
+        .prefetch_related('items')
+        .order_by('-created_at')
+    )
+    permission_classes = [IsAuthenticated, IsSupplyChain | IsStoresReadOnly]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'client_po', 'supplier']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PurchaseOrderCreateSerializer
+        return PurchaseOrderSerializer
+
+    def perform_create(self, serializer):
+        po = serializer.save()
+        ApprovalRequest.objects.create(
+            module='PURCHASE_ORDER',
+            reference_id=str(po.id),
+            requester=self.request.user,
+            required_role=Role.FINANCE,
+            rank=1,
+        )
+
+    # ... all your existing @action methods stay unchanged ...
+    from core.permissions import IsStores, IsSupplyChain, IsFinance, IsStoresReadOnly
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status', 'client_po', 'supplier']
 
@@ -1559,5 +1873,67 @@ class CannibalizationRequestViewSet(viewsets.ModelViewSet):
             'completed': qs.filter(status='COMPLETED').count(),
             'rejected': qs.filter(status='REJECTED').count(),
         })
+
+
+# =========================================================================
+# PHASE 2 — Viewsets for Inventory enhancements
+# =========================================================================
+
+class ItemCategoryViewSet(viewsets.ModelViewSet):
+    queryset = ItemCategory.objects.all().select_related('parent')
+    serializer_class = ItemCategorySerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['parent', 'is_active', 'level']
+
+    @action(detail=False, methods=['get'])
+    def tree(self, request):
+        roots = ItemCategory.objects.filter(parent__isnull=True, is_active=True)
+        return Response(ItemCategorySerializer(roots, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def flat(self, request):
+        qs = ItemCategory.objects.filter(is_active=True).order_by('code')
+        return Response(ItemCategoryFlatSerializer(qs, many=True).data)
+
+
+class ItemAliasViewSet(viewsets.ModelViewSet):
+    queryset = ItemAlias.objects.all().select_related('item', 'linked_item')
+    serializer_class = ItemAliasSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['item', 'alias_type']
+
+
+class SupplierItemViewSet(viewsets.ModelViewSet):
+    queryset = SupplierItem.objects.all().select_related('supplier', 'item')
+    serializer_class = SupplierItemSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['supplier', 'item', 'is_preferred', 'is_active']
+
+
+class StockMovementViewSet(viewsets.ModelViewSet):
+    queryset = StockMovement.objects.all().select_related(
+        'item', 'branch', 'supplier', 'client_po',
+        'purchase_order', 'grn', 'performed_by',
+    )
+    serializer_class = StockMovementSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['item', 'branch', 'direction', 'movement_type']
+    http_method_names = ['get', 'head', 'options']
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        from django.http import FileResponse
+        from core.pdf_utils import generate_stock_receipt_pdf
+        m = self.get_object()
+        buffer = generate_stock_receipt_pdf(m)
+        return FileResponse(
+            buffer,
+            as_attachment=True,
+            filename=f"{m.movement_no}.pdf",
+            content_type='application/pdf',
+        )
 
 

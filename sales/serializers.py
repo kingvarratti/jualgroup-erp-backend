@@ -125,8 +125,10 @@ class ClientPOCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
-        user = self.context['request'].user
-        po = ClientPO.objects.create(acknowledged_by=user, **validated_data)
+        # NOTE: acknowledged_by arrives via perform_create's
+        # serializer.save(acknowledged_by=self.request.user),
+        # which merges it into validated_data. Do NOT set it here.
+        po = ClientPO.objects.create(**validated_data)
         for item in items_data:
             item.pop('id', None)
             item.pop('total', None)
@@ -147,7 +149,6 @@ class ClientPOCreateSerializer(serializers.ModelSerializer):
                 item.pop('client_po', None)
                 ClientPOItem.objects.create(client_po=instance, **item)
         return instance
-
 
 
 

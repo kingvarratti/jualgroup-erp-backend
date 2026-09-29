@@ -917,3 +917,235 @@ def generate_stock_transfer_pdf(transfer):
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buffer.seek(0)
     return buffer
+
+
+
+# =========================================================================
+# PHASE 3 — Inventory PDFs (stock receipt, stock report)
+# =========================================================================
+
+def generate_stock_receipt_pdf(movement):
+    """Receipt / issue slip for a single StockMovement."""
+    buffer = io.BytesIO()
+    doc = _build_doc(buffer, f"Stock Movement {movement.movement_no}")
+    story = []
+
+    _company_header(story)
+    _doc_title(
+        story,
+        f"STOCK {movement.get_direction_display().upper()}",
+        f"Ref: {movement.movement_no}  |  {movement.get_movement_type_display()}  |  {movement.performed_at:%d %b %Y %H:%M}",
+    )
+
+    # Item + branch
+    info_rows = [
+        ("Item", f"{movement.item.part_number} — {movement.item.description}"),
+        ("UoM", movement.item.uom),
+        ("Branch", movement.branch.name),
+        ("Direction", movement.get_direction_display()),
+        ("Type", movement.get_movement_type_display()),
+        ("Quantity", f"{movement.quantity} {movement.item.uom}"),
+        ("Unit Cost", _format_currency(movement.unit_cost)),
+        ("Total Cost", _format_currency(movement.total_cost)),
+    ]
+    story.append(_info_table(info_rows))
+    story.append(Spacer(1, 6 * mm))
+
+    # Counterparty
+    cp_rows = [("Counterparty", movement.get_counterparty_type_display())]
+    if movement.supplier:
+        cp_rows.append(("Supplier", movement.supplier.name))
+    if movement.client_po:
+        cp_rows.append(("Client PO", movement.client_po.internal_order_no))
+    if movement.purchase_order:
+        cp_rows.append(("Purchase Order", movement.purchase_order.po_no))
+    if movement.grn:
+        cp_rows.append(("GRN", movement.grn.grn_no))
+    if movement.reference:
+        cp_rows.append(("External Reference", movement.reference))
+    if movement.performed_by:
+        cp_rows.append((
+            "Performed By",
+            movement.performed_by.get_full_name() or movement.performed_by.username,
+        ))
+    story.append(_info_table(cp_rows))
+
+    # Reason / notes
+    if movement.reason or movement.notes:
+        story.append(Spacer(1, 8 * mm))
+        styles = getSampleStyleSheet()
+        note_style = ParagraphStyle(
+            'Note', parent=styles['Normal'],
+            fontSize=9, textColor=colors.HexColor('#1e293b'),
+        )
+        if movement.reason:
+            story.append(Paragraph("<b>Reason</b>", note_style))
+            story.append(Paragraph(movement.reason, note_style))
+        if movement.notes:
+            story.append(Spacer(1, 3 * mm))
+            story.append(Paragraph("<b>Notes</b>", note_style))
+            story.append(Paragraph(movement.notes, note_style))
+
+    # Signature block
+    story.append(Spacer(1, 20 * mm))
+    sig_data = [
+        ["_______________________", "_______________________", "_______________________"],
+        ["Issued By", "Checked By", "Received By"],
+    ]
+    sig_table = Table(sig_data, colWidths=[55 * mm, 55 * mm, 55 * mm])
+    sig_table.setStyle(TableStyle([
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(sig_table)
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_stock_report_pdf(branch=None, category=None, include_values=True):
+    """Inventory report — on-hand, received, issued, returned, rejected, total value."""
+    from procurement.models import InventoryItem, BranchStock
+
+    buffer = io.BytesIO()
+    title = "Inventory Stock Report"
+    doc = _build_doc(buffer, title)
+    story = []
+
+    _company_header(story)
+
+    subtitle_parts = [f"Generated: {timezone.now():%d %b %Y %H:%M}"]
+    if branch:
+        subtitle_parts.append(f"Branch: {branch.name}")
+    if category:
+        subtitle_parts.append(f"Category: {category}")
+
+    _doc_title(story, title.upper(), "  |  ".join(subtitle_parts))
+
+    # Pick the queryset
+    if branch:
+        qs = (
+            BranchStock.objects
+            .filter(branch=branch)
+            .select_related('item', 'branch')
+            .order_by('item__part_number')
+        )
+        rows_source = [('branch_stock', bs) for bs in qs]
+    else:
+        qs = InventoryItem.objects.filter(is_active=True).order_by('part_number')
+        if category:
+            qs = qs.filter(category=category)
+        rows_source = [('item', it) for it in qs]
+
+    # Build table
+    header = ["#", "Part No.", "Description", "UoM", "On Hand"]
+    if include_values:
+        header += ["Unit Cost", "Total Value"]
+    if branch:
+        header += ["Received", "Issued", "Returned", "Rejected"]
+
+    line_data = [header]
+    total_value = Decimal('0')
+    total_units = Decimal('0')
+
+    for idx, (kind, obj) in enumerate(rows_source, start=1):
+        if kind == 'branch_stock':
+            it = obj.item
+            on_hand = obj.quantity_on_hand or 0
+            row = [
+                str(idx),
+                it.part_number,
+                it.description[:40],
+                it.uom,
+                f"{on_hand}",
+            ]
+            if include_values:
+                unit_cost = it.unit_cost or 0
+                val = (on_hand or 0) * (unit_cost or 0)
+                total_value += Decimal(str(val))
+                row += [
+                    _format_currency(unit_cost),
+                    _format_currency(val),
+                ]
+            row += [
+                f"{obj.qty_received or 0}",
+                f"{obj.qty_issued or 0}",
+                f"{obj.qty_returned or 0}",
+                f"{obj.qty_rejected or 0}",
+            ]
+        else:
+            on_hand = obj.quantity_on_hand or 0
+            row = [
+                str(idx),
+                obj.part_number,
+                obj.description[:40],
+                obj.uom,
+                f"{on_hand}",
+            ]
+            if include_values:
+                unit_cost = obj.unit_cost or 0
+                val = (on_hand or 0) * (unit_cost or 0)
+                total_value += Decimal(str(val))
+                row += [
+                    _format_currency(unit_cost),
+                    _format_currency(val),
+                ]
+        total_units += Decimal(str(on_hand))
+        line_data.append(row)
+
+    # Column widths
+    if branch:
+        col_widths = [8 * mm, 28 * mm, 55 * mm, 12 * mm, 18 * mm]
+        if include_values:
+            col_widths += [22 * mm, 25 * mm]
+        col_widths += [18 * mm, 18 * mm, 18 * mm, 18 * mm]
+    else:
+        col_widths = [8 * mm, 30 * mm, 65 * mm, 14 * mm, 20 * mm]
+        if include_values:
+            col_widths += [25 * mm, 28 * mm]
+
+    # Fit into A4 printable width (~170mm). Scale down if needed.
+    total_w = sum(col_widths)
+    max_w = A4[0] - 40 * mm
+    if total_w > max_w:
+        scale = float(max_w) / float(total_w)
+        col_widths = [w * scale for w in col_widths]
+
+    line_table = Table(line_data, colWidths=col_widths, repeatRows=1)
+    line_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e3a8a')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 7.5),
+        ('ALIGN', (4, 1), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8fafc')]),
+    ]))
+    story.append(line_table)
+
+    # Totals
+    story.append(Spacer(1, 5 * mm))
+    totals_rows = [["Total Items", str(len(rows_source)), "Total Units", f"{total_units:,.2f}"]]
+    if include_values:
+        totals_rows.append(["", "", "Total Value", _format_currency(total_value)])
+    totals_table = Table(totals_rows, colWidths=[35 * mm, 30 * mm, 35 * mm, 50 * mm])
+    totals_table.setStyle(TableStyle([
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+        ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+        ('TEXTCOLOR', (2, 0), (2, -1), colors.HexColor('#1e3a8a')),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(totals_table)
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buffer.seek(0)
+    return buffer

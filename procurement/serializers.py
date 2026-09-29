@@ -7,7 +7,9 @@ from .models import (
     SupplierPayment, WarehouseMovement, EnquirySourcing,
     RequisitionRequest, RequisitionItem,
     StockTransferRequest, StockTransferItem, InternalMovement, CannibalizationRequest, CannibalizationItem,
+    ClientPO, ItemCategory, ItemAlias, SupplierItem, StockMovement,
 )
+from core.models import User, Branch
 
 
 class BranchStockSerializer(serializers.ModelSerializer):
@@ -481,4 +483,111 @@ class CannibalizationRequestCreateSerializer(serializers.ModelSerializer):
 
 
 
+# =========================================================================
+# PHASE 2 — Serializers for Inventory enhancements
+# =========================================================================
 
+class ItemCategorySerializer(serializers.ModelSerializer):
+    children = serializers.SerializerMethodField()
+    full_path = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = ItemCategory
+        fields = [
+            'id', 'code', 'name', 'parent', 'level',
+            'description', 'is_active', 'full_path',
+            'children', 'created_at',
+        ]
+        read_only_fields = ['id', 'level', 'created_at', 'full_path']
+
+    def get_children(self, obj):
+        qs = obj.children.filter(is_active=True)
+        return ItemCategorySerializer(qs, many=True).data
+
+
+class ItemCategoryFlatSerializer(serializers.ModelSerializer):
+    full_path = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = ItemCategory
+        fields = ['id', 'code', 'name', 'parent', 'level', 'full_path', 'is_active']
+
+
+class ItemAliasSerializer(serializers.ModelSerializer):
+    item_part_number = serializers.CharField(source='item.part_number', read_only=True)
+    alias_type_display = serializers.CharField(source='get_alias_type_display', read_only=True)
+    linked_item_part_number = serializers.CharField(
+        source='linked_item.part_number', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = ItemAlias
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
+
+
+class SupplierItemSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    item_part_number = serializers.CharField(source='item.part_number', read_only=True)
+    item_description = serializers.CharField(source='item.description', read_only=True)
+
+    class Meta:
+        model = SupplierItem
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class StockMovementSerializer(serializers.ModelSerializer):
+    item_part_number = serializers.CharField(source='item.part_number', read_only=True)
+    item_description = serializers.CharField(source='item.description', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    supplier_name = serializers.SerializerMethodField()
+    client_po_no = serializers.SerializerMethodField()
+    po_no = serializers.SerializerMethodField()
+    movement_type_display = serializers.CharField(
+        source='get_movement_type_display', read_only=True,
+    )
+    direction_display = serializers.CharField(
+        source='get_direction_display', read_only=True,
+    )
+    performed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StockMovement
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'movement_no', 'total_cost',
+            'performed_by', 'performed_at',
+        ]
+
+    def get_supplier_name(self, obj):
+        return obj.supplier.name if obj.supplier else None
+
+    def get_client_po_no(self, obj):
+        return obj.client_po.internal_order_no if obj.client_po else None
+
+    def get_po_no(self, obj):
+        return obj.purchase_order.po_no if obj.purchase_order else None
+
+    def get_performed_by_name(self, obj):
+        if not obj.performed_by:
+            return None
+        return obj.performed_by.get_full_name() or obj.performed_by.username
+
+
+class BulkItemCreateSerializer(serializers.Serializer):
+    supplier = serializers.UUIDField(required=False, allow_null=True)
+    branch = serializers.UUIDField(required=False, allow_null=True)
+    items = serializers.ListField(child=serializers.DictField(), allow_empty=False)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError('At least one item required.')
+        for idx, row in enumerate(value):
+            if not row.get('part_number'):
+                raise serializers.ValidationError(f'Row {idx+1}: part_number is required.')
+            if not row.get('description'):
+                raise serializers.ValidationError(f'Row {idx+1}: description is required.')
+            if not row.get('uom'):
+                raise serializers.ValidationError(f'Row {idx+1}: uom is required.')
+        return value

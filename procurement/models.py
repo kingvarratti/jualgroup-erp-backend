@@ -21,6 +21,20 @@ class InventoryItem(models.Model):
     description = models.CharField(max_length=300)
     manufacturer = models.CharField(max_length=100, blank=True, default='ABB')
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='ABB')
+        # NEW — hierarchical category + preferred supplier
+    item_category = models.ForeignKey(
+        'ItemCategory',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='items',
+        help_text='Structured category (replaces the flat category field over time)',
+    )
+    preferred_supplier = models.ForeignKey(
+        'Supplier',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='preferred_for_items',
+    )
     uom = models.CharField(max_length=20, help_text='Unit of Measure')
     quantity_on_hand = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     reorder_level = models.DecimalField(max_digits=14, decimal_places=2, default=0)
@@ -92,6 +106,13 @@ class BranchStock(models.Model):
     location = models.CharField(max_length=100, blank=True, help_text='Shelf/Rack')
     bin_number = models.CharField(max_length=50, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    qty_received = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    qty_issued = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    qty_returned = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    qty_rejected = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    @property
+    def total_cost(self):
+        return (self.quantity_on_hand or 0) * (self.item.unit_cost or 0)
 
     class Meta:
         unique_together = ('item', 'branch')
@@ -1004,3 +1025,232 @@ class CannibalizationItem(models.Model):
 
     def __str__(self):
         return f"{self.part_number} x {self.quantity}"
+
+
+# =========================================================================
+# PHASE 1 ADDITIONS — Inventory enhancements
+# =========================================================================
+
+class ItemCategory(models.Model):
+    """Hierarchical category: Group → Subgroup → Sub-subgroup (unlimited depth)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=30, unique=True)
+    name = models.CharField(max_length=100)
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='children',
+    )
+    level = models.PositiveSmallIntegerField(default=1, editable=False)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['code']
+        verbose_name = 'Item Category'
+        verbose_name_plural = 'Item Categories'
+
+    def save(self, *args, **kwargs):
+        self.level = (self.parent.level + 1) if self.parent else 1
+        super().save(*args, **kwargs)
+
+    def full_path(self):
+        """'ABB > Drives > VFD' — for display."""
+        parts = [self.name]
+        node = self.parent
+        while node:
+            parts.insert(0, node.name)
+            node = node.parent
+        return ' > '.join(parts)
+
+    def __str__(self):
+        return f"{self.code} — {self.name}"
+
+
+class ItemAlias(models.Model):
+    """Multiple aliases / alternative part numbers / supersession links per item."""
+    TYPE = (
+        ('ALIAS', 'Alias / Common Name'),
+        ('ALTERNATIVE', 'Alternative Item'),
+        ('SUPERSEDES', 'Supersedes (this replaces…)'),
+        ('SUPERSEDED_BY', 'Superseded By (…replaces this)'),
+        ('OEM', 'OEM Equivalent'),
+        ('CUSTOMER_REF', 'Customer Reference'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.CASCADE,
+        related_name='aliases',
+    )
+    alias_type = models.CharField(max_length=20, choices=TYPE, default='ALIAS')
+    value = models.CharField(
+        max_length=200,
+        help_text='Alias / alt part number / superseding part number',
+    )
+    linked_item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='alias_links',
+        help_text='Optional: link to the actual alternative/superseding item',
+    )
+    notes = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['item__part_number', 'alias_type']
+        unique_together = ('item', 'alias_type', 'value')
+
+    def __str__(self):
+        return f"{self.item.part_number} [{self.alias_type}] → {self.value}"
+
+
+class SupplierItem(models.Model):
+    """Which suppliers supply which items, with per-supplier pricing."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name='supplied_items',
+    )
+    item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.CASCADE,
+        related_name='suppliers',
+    )
+    supplier_part_number = models.CharField(max_length=100, blank=True)
+    last_unit_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    lead_time_days = models.PositiveIntegerField(default=0)
+    is_preferred = models.BooleanField(
+        default=False,
+        help_text='Preferred supplier for this item',
+    )
+    is_active = models.BooleanField(default=True)
+    notes = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('supplier', 'item')
+        ordering = ['supplier__name', 'item__part_number']
+        verbose_name = 'Supplier Item'
+        verbose_name_plural = 'Supplier Items'
+
+    def __str__(self):
+        return f"{self.supplier.name} → {self.item.part_number}"
+
+
+class StockMovement(models.Model):
+    """
+    Unified stock movement log — every receipt, issue, return, rejection, transfer.
+    Complements (doesn't replace) WarehouseMovement for legacy flows.
+    """
+    DIRECTION = (
+        ('IN', 'Stock In'),
+        ('OUT', 'Stock Out'),
+        ('INTERNAL', 'Internal Transfer'),
+    )
+
+    MOVEMENT_TYPE = (
+        ('RECEIPT', 'Receipt from Supplier'),
+        ('ISSUE', 'Issue to Requisition'),
+        ('SALE', 'Sale to Client'),
+        ('CLIENT_RETURN', 'Return from Client'),
+        ('SUPPLIER_RETURN', 'Return to Supplier'),
+        ('REJECTION_PURCHASE', 'Rejected on Receipt (back to Supplier)'),
+        ('REJECTION_SALE', 'Rejected by Client (back from Client)'),
+        ('TRANSFER_OUT', 'Transfer Out'),
+        ('TRANSFER_IN', 'Transfer In'),
+        ('ADJUSTMENT', 'Adjustment'),
+        ('CANNIBAL_IN', 'From Cannibalization'),
+        ('CANNIBAL_OUT', 'To Cannibalization'),
+    )
+
+    COUNTERPARTY = (
+        ('SUPPLIER', 'Supplier'),
+        ('CLIENT', 'Client'),
+        ('INTERNAL', 'Internal / Branch'),
+        ('NONE', 'None'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    movement_no = models.CharField(max_length=30, unique=True, editable=False)
+
+    item = models.ForeignKey(
+        InventoryItem, on_delete=models.PROTECT,
+        related_name='stock_movements',
+    )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.PROTECT,
+        related_name='stock_movements',
+    )
+
+    direction = models.CharField(max_length=10, choices=DIRECTION)
+    movement_type = models.CharField(max_length=30, choices=MOVEMENT_TYPE)
+    counterparty_type = models.CharField(
+        max_length=20, choices=COUNTERPARTY, default='NONE',
+    )
+
+    # Optional counterparty links — only the relevant ones get filled
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_movements',
+    )
+    client_po = models.ForeignKey(
+        ClientPO, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_movements',
+    )
+    purchase_order = models.ForeignKey(
+        PurchaseOrder, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_movements',
+    )
+    grn = models.ForeignKey(
+        GoodsReceivedNote, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_movements',
+    )
+
+    quantity = models.DecimalField(max_digits=14, decimal_places=2)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_cost = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, editable=False,
+    )
+
+    reference = models.CharField(
+        max_length=100, blank=True,
+        help_text='Waybill / invoice / GRN no / external ref',
+    )
+    reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+
+    performed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='stock_movements_performed',
+    )
+    performed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-performed_at']
+        verbose_name = 'Stock Movement'
+        verbose_name_plural = 'Stock Movements'
+        indexes = [
+            models.Index(fields=['item', 'branch']),
+            models.Index(fields=['movement_type']),
+            models.Index(fields=['direction']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.movement_no:
+            self.movement_no = f"SM-{uuid.uuid4().hex[:8].upper()}"
+        self.total_cost = (self.quantity or 0) * (self.unit_cost or 0)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return (
+            f"{self.movement_no} {self.get_movement_type_display()} "
+            f"{self.item.part_number} x {self.quantity}"
+        )

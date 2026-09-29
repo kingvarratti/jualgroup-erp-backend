@@ -6,6 +6,7 @@ from .views import (
     GoodsReceivedNoteViewSet, SupplierPaymentViewSet, WarehouseMovementViewSet,
     EnquirySourcingViewSet, RequisitionRequestViewSet, StockTransferRequestViewSet,
     InternalMovementViewSet, CannibalizationRequestViewSet,
+    ItemCategoryViewSet, ItemAliasViewSet, SupplierItemViewSet, StockMovementViewSet,
 )
 
 router = DefaultRouter()
@@ -24,5 +25,11 @@ router.register('grns', GoodsReceivedNoteViewSet)
 router.register('supplier-payments', SupplierPaymentViewSet)
 router.register('warehouse-movements', WarehouseMovementViewSet)
 router.register('sourcing', EnquirySourcingViewSet)
+
+# ---- PHASE 2 additions ----
+router.register('categories', ItemCategoryViewSet, basename='itemcategory')
+router.register('aliases', ItemAliasViewSet, basename='itemalias')
+router.register('supplier-items', SupplierItemViewSet, basename='supplieritem')
+router.register('stock-movements', StockMovementViewSet, basename='stockmovement')
 
 urlpatterns = [path('', include(router.urls))]
